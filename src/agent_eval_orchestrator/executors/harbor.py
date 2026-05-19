@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import json
+import shutil
+import shlex
+from pathlib import Path
+from typing import Any
+
+from agent_eval_orchestrator.core.defaults import DEFAULT_HARBOR_REPO
+from agent_eval_orchestrator.executors.base import CollectedArtifacts, Executor, PreparedBatch
+
+
+def _copy_selected_tasks(dataset_path: Path, selected_case_ids: list[str], target_root: Path) -> Path:
+    target_root.mkdir(parents=True, exist_ok=True)
+    for case_id in selected_case_ids:
+        source_dir = dataset_path / case_id
+        if not source_dir.exists():
+            raise RuntimeError(f"selected case path not found: {source_dir}")
+        shutil.copytree(source_dir, target_root / case_id, dirs_exist_ok=True)
+    return target_root
+
+
+class HarborExecutor(Executor):
+    kind = "harbor-docker"
+
+    @staticmethod
+    def _resolve_worker_override(executor_config: dict[str, Any], worker_id: str | None, key: str, default: Any) -> Any:
+        if worker_id:
+            mapping = executor_config.get(f"{key}ByWorker")
+            if isinstance(mapping, dict) and worker_id in mapping:
+                return mapping[worker_id]
+        return executor_config.get(key, default)
+
+    def prepare(
+        self,
+        *,
+        batch: dict[str, Any],
+        run: dict[str, Any],
+        template: dict[str, Any],
+        dataset_ref: str,
+        executor_config: dict[str, Any],
+        local_root: Path,
+    ) -> PreparedBatch:
+        batch_root = Path(str(batch["batch_root"])).resolve()
+        batch_root.mkdir(parents=True, exist_ok=True)
+        worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip() or None
+        harbor_root = Path(
+            str(self._resolve_worker_override(executor_config, worker_id, "harborRepoPath", DEFAULT_HARBOR_REPO))
+        ).resolve()
+        if not harbor_root.exists():
+            raise RuntimeError(f"harbor repo not found: {harbor_root}")
+
+        dataset_path = Path(
+            str(self._resolve_worker_override(executor_config, worker_id, "datasetPath", dataset_ref))
+        ).expanduser().resolve()
+        if not dataset_path.exists():
+            raise RuntimeError(f"dataset path not found: {dataset_path}")
+
+        selected_case_ids = list(batch.get("selected_case_ids") or [])
+        effective_dataset_path = dataset_path
+        if selected_case_ids and not (dataset_path / "task.toml").exists():
+            effective_dataset_path = _copy_selected_tasks(
+                dataset_path,
+                selected_case_ids,
+                local_root / "dataset-subset",
+            )
+
+        jobs_dir = batch_root / "harbor" / "jobs"
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        job_name = str(batch["batch_id"])
+        job_dir = jobs_dir / job_name
+        worker_log_path = batch_root / "worker.log"
+
+        uv_binary = str(self._resolve_worker_override(executor_config, worker_id, "uvBinary", "uv"))
+        harbor_args = [
+            "run",
+            "harbor",
+            "run",
+            "--job-name",
+            job_name,
+            "--jobs-dir",
+            str(jobs_dir),
+            "-p",
+            str(effective_dataset_path),
+            "-a",
+            str(self._resolve_worker_override(executor_config, worker_id, "agentName", "oracle")),
+            "-e",
+            str(self._resolve_worker_override(executor_config, worker_id, "envType", "docker")),
+            "--n-concurrent",
+            str(min(
+                int(executor_config.get("nConcurrent") or batch.get("batch_options", {}).get("concurrency") or 1),
+                max(1, len(selected_case_ids) or 1),
+            )),
+            "-y",
+        ]
+        model_name = str(self._resolve_worker_override(executor_config, worker_id, "modelName", "") or "").strip()
+        if model_name:
+            harbor_args.extend(["-m", model_name])
+
+        agent_kwargs = self._resolve_worker_override(executor_config, worker_id, "agentKwargs", {}) or {}
+        for key, value in sorted(agent_kwargs.items()):
+            harbor_args.extend(["--ak", f"{key}={value}"])
+        agent_env = self._resolve_worker_override(executor_config, worker_id, "agentEnv", {}) or {}
+        for key, value in sorted(agent_env.items()):
+            harbor_args.extend(["--ae", f"{key}={value}"])
+        mounts = self._resolve_worker_override(executor_config, worker_id, "mounts", None)
+        if mounts:
+            harbor_args.extend(["--mounts", json.dumps(mounts, ensure_ascii=False)])
+        for extra_arg in executor_config.get("extraArgs") or []:
+            harbor_args.append(str(extra_arg))
+
+        quoted_uv = shlex.quote(uv_binary)
+        quoted_args = " ".join(shlex.quote(arg) for arg in harbor_args)
+        command = [
+            "/bin/bash",
+            "-lc",
+            (
+                f"if ! command -v {quoted_uv} >/dev/null 2>&1 && [ ! -x {quoted_uv} ]; then "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh; "
+                "fi; "
+                f"exec {quoted_uv} {quoted_args}"
+            ),
+        ]
+
+        env = {
+            **{
+                key: str(value)
+                for key, value in (self._resolve_worker_override(executor_config, worker_id, "processEnv", {}) or {}).items()
+            },
+            "PYTHONUNBUFFERED": "1",
+        }
+        metadata = {
+            "executorKind": self.kind,
+            "harborRepoPath": str(harbor_root),
+            "jobName": job_name,
+            "jobsDir": str(jobs_dir),
+            "datasetPath": str(effective_dataset_path),
+            "selectedCaseIds": selected_case_ids,
+            "command": command,
+            "collectJobs": bool(executor_config.get("collectJobs")),
+            "combinedJobsDir": str(executor_config.get("combinedJobsDir") or ""),
+        }
+        return PreparedBatch(
+            command=command,
+            env=env,
+            cwd=harbor_root,
+            batch_root=batch_root,
+            local_root=local_root,
+            job_name=job_name,
+            jobs_dir=jobs_dir,
+            job_dir=job_dir,
+            dataset_path=effective_dataset_path,
+            worker_log_path=worker_log_path,
+            metadata=metadata,
+        )
+
+    def collect(self, prepared: PreparedBatch) -> CollectedArtifacts:
+        result_path = prepared.job_dir / "result.json"
+        return CollectedArtifacts(
+            job_dir=prepared.job_dir,
+            job_result_path=result_path if result_path.exists() else None,
+            metadata={
+                **prepared.metadata,
+                "jobDirExists": prepared.job_dir.exists(),
+                "jobResultPath": str(result_path),
+            },
+        )

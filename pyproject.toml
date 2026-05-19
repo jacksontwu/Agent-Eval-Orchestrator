@@ -1,0 +1,16 @@
+[project]
+name = "agent-eval-orchestrator"
+version = "0.1.0"
+description = "Distributed evaluation controller-worker platform with pluggable executors."
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
