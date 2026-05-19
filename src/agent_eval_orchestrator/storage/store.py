@@ -9,6 +9,7 @@ from typing import Any
 
 from agent_eval_orchestrator.core.defaults import (
     DEFAULT_HEARTBEAT_TIMEOUT_SEC,
+    DEFAULT_PER_WORKER_CONCURRENCY,
     DEFAULT_PRESET_DATASETS,
 )
 from agent_eval_orchestrator.core.ids import new_id, now_iso, sanitize_name
@@ -318,7 +319,7 @@ class Store:
         if not worker_ids:
             raise RuntimeError("worker_ids must not be empty")
         options = dict(batch_options or {})
-        max_concurrency = int(options.get("concurrency") or 10)
+        max_concurrency = int(options.get("concurrency") or DEFAULT_PER_WORKER_CONCURRENCY)
         shard_count = len(worker_ids)
         case_groups = [[] for _ in range(shard_count)]
         for index, case_id in enumerate(selected_case_ids):
@@ -429,6 +430,78 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
         return [self._decorate_worker(self._worker_item(row)) for row in rows]
+
+    def list_worker_runtime_status(self) -> dict[str, Any]:
+        workers = {item["worker_id"]: item for item in self.list_workers()}
+        runs = {item["run_id"]: item for item in self.list_runs()}
+        templates = {item["template_id"]: item for item in self.list_task_templates()}
+        worker_states: dict[str, dict[str, Any]] = {}
+        for worker_id, worker in workers.items():
+            worker_states[worker_id] = {
+                "workerId": worker_id,
+                "workerName": worker["display_name"],
+                "status": worker["status"],
+                "slotsTotal": worker["slots_total"],
+                "slotsUsed": worker["slots_used"],
+                "availableSlots": max(0, int(worker["slots_total"]) - int(worker["slots_used"])),
+                "runningBatches": [],
+                "queuedBatches": [],
+            }
+        shared_queue: list[dict[str, Any]] = []
+
+        def batch_runtime_item(batch: dict[str, Any], *, queue_position: int | None = None) -> dict[str, Any]:
+            run = runs.get(str(batch["run_id"]))
+            template = templates.get(str(run["template_id"])) if run else None
+            return {
+                "batchId": batch["batch_id"],
+                "runId": batch["run_id"],
+                "runName": run["display_name"] if run else None,
+                "taskName": template["name"] if template else None,
+                "datasetRef": template["dataset_ref"] if template else None,
+                "status": batch["status"],
+                "currentStep": batch["current_step"],
+                "preferredWorkerId": batch["preferred_worker_id"],
+                "assignedWorkerId": batch["assigned_worker_id"],
+                "caseCount": len(batch.get("selected_case_ids") or []),
+                "createdAt": batch["created_at"],
+                "startedAt": batch["started_at"],
+                "finishedAt": batch["finished_at"],
+                "queuePosition": queue_position,
+            }
+
+        queued_positions: dict[str, int] = {}
+        for batch in sorted(self.list_batches(), key=lambda item: str(item["created_at"])):
+            status = str(batch["status"])
+            run = runs.get(str(batch["run_id"]))
+            target_worker = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip()
+            if not target_worker and run:
+                target_worker = str(run.get("bound_worker_id") or "").strip()
+            if status == "running" and target_worker in worker_states:
+                worker_states[target_worker]["runningBatches"].append(batch_runtime_item(batch))
+            elif status == "queued":
+                if target_worker in worker_states:
+                    queued_positions[target_worker] = queued_positions.get(target_worker, 0) + 1
+                    worker_states[target_worker]["queuedBatches"].append(
+                        batch_runtime_item(batch, queue_position=queued_positions[target_worker])
+                    )
+                else:
+                    shared_queue.append(batch_runtime_item(batch, queue_position=len(shared_queue) + 1))
+
+        for item in worker_states.values():
+            item["runningCount"] = len(item["runningBatches"])
+            item["queuedCount"] = len(item["queuedBatches"])
+            item["currentBatch"] = item["runningBatches"][0] if item["runningBatches"] else None
+
+        return {
+            "time": now_iso(),
+            "workers": list(worker_states.values()),
+            "sharedQueue": shared_queue,
+            "summary": {
+                "runningBatches": sum(len(item["runningBatches"]) for item in worker_states.values()),
+                "queuedBatches": sum(len(item["queuedBatches"]) for item in worker_states.values()) + len(shared_queue),
+                "sharedQueuedBatches": len(shared_queue),
+            },
+        }
 
     def claim_next_batch(self, worker_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:

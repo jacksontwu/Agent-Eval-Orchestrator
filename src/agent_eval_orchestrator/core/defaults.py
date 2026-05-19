@@ -8,6 +8,7 @@ DEFAULT_PORT = 8790
 DEFAULT_POLL_INTERVAL_SEC = 5
 DEFAULT_HEARTBEAT_TIMEOUT_SEC = 45
 DEFAULT_SLOTS = 1
+DEFAULT_PER_WORKER_CONCURRENCY = 3
 DEFAULT_SHARED_ROOT = Path("/root/projects/agent-eval-orchestrator/runtime").resolve()
 DEFAULT_HARBOR_REPO = Path("/root/projects/harbor").resolve()
 DEFAULT_PRESET_DATASETS = {

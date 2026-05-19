@@ -263,6 +263,29 @@ INDEX_HTML = """<!doctype html>
       gap: 8px;
       flex-wrap: wrap;
     }
+    .queue-summary {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 12px;
+    }
+    .queue-row {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfdff;
+      margin-bottom: 8px;
+    }
+    .queue-row:last-child {
+      margin-bottom: 0;
+    }
+    .queue-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -393,7 +416,7 @@ INDEX_HTML = """<!doctype html>
     <div class="header">
       <div>
         <h1>Agent Eval Orchestrator</h1>
-        <p>页面版本 2026-05-18-3 · 创建页按 bitfun-cli 分布式评测收敛，结果细节交给 Harbor Viewer</p>
+        <p>页面版本 2026-05-19-1 · Workers 页展示运行状态与排队情况</p>
       </div>
       <div class="header-actions">
         <a class="primary" id="openCreateBtn" href="/create">创建分布式任务</a>
@@ -454,6 +477,7 @@ INDEX_HTML = """<!doctype html>
           <div class="panel-header">
             <h2>Workers</h2>
           </div>
+          <div id="workerRuntimeSummary"></div>
           <div class="panel-body list" id="workerList"></div>
         </div>
         <div class="panel">
@@ -493,7 +517,7 @@ INDEX_HTML = """<!doctype html>
               </div>
               <div class="field">
                 <label>Per Worker Concurrency</label>
-                <input name="nConcurrent" type="number" min="1" value="10" required />
+                <input name="nConcurrent" type="number" min="1" value="3" required />
               </div>
             </div>
 
@@ -550,6 +574,7 @@ INDEX_HTML = """<!doctype html>
     const state = {
       tasks: [],
       workers: [],
+      workerRuntime: null,
       selectedTaskId: null,
       selectedWorkerId: null,
       taskDetail: null,
@@ -628,12 +653,14 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function loadDashboard() {
-      const [tasksPayload, workersPayload] = await Promise.all([
+      const [tasksPayload, workersPayload, workerRuntimePayload] = await Promise.all([
         api("/api/dashboard/tasks"),
         api("/api/workers"),
+        api("/api/workers/runtime"),
       ]);
       state.tasks = tasksPayload.items;
       state.workers = workersPayload;
+      state.workerRuntime = workerRuntimePayload;
       try {
         const datasetsPayload = await api("/api/datasets");
         state.datasets = datasetsPayload.items || [];
@@ -646,6 +673,7 @@ INDEX_HTML = """<!doctype html>
       document.getElementById("runningCount").textContent = state.tasks.filter(t => t.status === "running").length;
       document.getElementById("finishedCount").textContent = state.tasks.filter(t => t.status === "finished").length;
       renderTaskList();
+      renderWorkerRuntimeSummary();
       renderWorkerList();
       renderCreateWorkerConfigs();
       renderDatasetOptions();
@@ -656,6 +684,39 @@ INDEX_HTML = """<!doctype html>
       if (state.selectedWorkerId) {
         renderWorkerDetail();
       }
+    }
+
+    function runtimeForWorker(workerId) {
+      const items = state.workerRuntime?.workers || [];
+      return items.find(item => item.workerId === workerId) || null;
+    }
+
+    function renderWorkerRuntimeSummary() {
+      const el = document.getElementById("workerRuntimeSummary");
+      if (!el) return;
+      const summary = state.workerRuntime?.summary || {};
+      el.innerHTML = '' +
+        '<div class="queue-summary">' +
+          '<div class="stat"><div class="subtle">Running batches</div><strong>' + esc(summary.runningBatches ?? 0) + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Queued batches</div><strong>' + esc(summary.queuedBatches ?? 0) + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Shared queue</div><strong>' + esc(summary.sharedQueuedBatches ?? 0) + '</strong></div>' +
+        '</div>';
+    }
+
+    function runtimeBatchRow(item) {
+      return '' +
+        '<div class="queue-row">' +
+          '<div class="queue-title">' +
+            '<strong>' + esc(item.runName || item.taskName || item.runId || "-") + '</strong>' +
+            badge(item.status || "-") +
+          '</div>' +
+          '<div class="item-meta">' +
+            '<span>batch: <code>' + esc(item.batchId || "-") + '</code></span>' +
+            '<span>cases: ' + esc(item.caseCount ?? 0) + '</span>' +
+            (item.queuePosition ? '<span>queue: #' + esc(item.queuePosition) + '</span>' : '') +
+            (item.currentStep ? '<span>step: ' + esc(item.currentStep) + '</span>' : '') +
+          '</div>' +
+        '</div>';
     }
 
     function preferredDatasetRef() {
@@ -1018,13 +1079,18 @@ INDEX_HTML = """<!doctype html>
       }
       el.innerHTML = state.workers.map(worker => {
         const active = worker.worker_id === state.selectedWorkerId ? " active" : "";
+        const runtime = runtimeForWorker(worker.worker_id) || {};
+        const current = runtime.currentBatch;
         return '<button class="item' + active + '" data-worker-id="' + esc(worker.worker_id) + '">' +
           '<div class="item-title"><strong>' + esc(worker.display_name) + '</strong>' + badge(worker.status) + '</div>' +
           '<div class="item-meta">' +
             '<span>host: <code>' + esc(worker.host) + '</code></span>' +
             '<span>manual: ' + badge(worker.manualStatus) + '</span>' +
             '<span>slots: ' + worker.slots_used + '/' + worker.slots_total + '</span>' +
+            '<span>running: ' + esc(runtime.runningCount ?? 0) + '</span>' +
+            '<span>queued: ' + esc(runtime.queuedCount ?? 0) + '</span>' +
           '</div>' +
+          (current ? '<div class="item-meta" style="margin-top:6px"><span>current: <code>' + esc(current.runName || current.runId || "-") + '</code></span></div>' : '') +
         '</button>';
       }).join("");
       el.querySelectorAll("[data-worker-id]").forEach(btn => {
@@ -1044,12 +1110,25 @@ INDEX_HTML = """<!doctype html>
         return;
       }
       document.getElementById("workerDetailTitle").textContent = worker.display_name;
+      const runtime = runtimeForWorker(worker.worker_id) || {};
+      const runningRows = (runtime.runningBatches || []).map(runtimeBatchRow).join("") || '<div class="empty">当前没有运行中的 batch</div>';
+      const queuedRows = (runtime.queuedBatches || []).map(runtimeBatchRow).join("") || '<div class="empty">当前没有排队 batch</div>';
       root.innerHTML =
         '<div class="detail-grid">' +
           '<div class="stat"><div class="subtle">Worker ID</div><strong><code>' + esc(worker.worker_id) + '</code></strong></div>' +
           '<div class="stat"><div class="subtle">Host</div><strong class="subtle">' + esc(worker.host) + '</strong></div>' +
           '<div class="stat"><div class="subtle">Status</div><strong>' + badge(worker.status) + '</strong></div>' +
           '<div class="stat"><div class="subtle">Heartbeat</div><strong class="subtle">' + esc(worker.last_heartbeat_at || "-") + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Running</div><strong>' + esc(runtime.runningCount ?? 0) + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Queued</div><strong>' + esc(runtime.queuedCount ?? 0) + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Available Slots</div><strong>' + esc(runtime.availableSlots ?? Math.max(0, worker.slots_total - worker.slots_used)) + '</strong></div>' +
+        '</div>' +
+        '<div style="margin-bottom:18px">' +
+          '<h3 style="margin-bottom:8px">运行状态</h3>' +
+          '<div class="detail-grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));align-items:start">' +
+            '<div><div class="subtle" style="margin-bottom:8px">Running</div>' + runningRows + '</div>' +
+            '<div><div class="subtle" style="margin-bottom:8px">Queued</div>' + queuedRows + '</div>' +
+          '</div>' +
         '</div>' +
         '<form id="workerForm">' +
           '<div class="field"><label>显示名称</label><input name="displayName" value="' + esc(worker.display_name) + '" /></div>' +
@@ -1096,7 +1175,7 @@ INDEX_HTML = """<!doctype html>
         .split(/[\\n,]/)
         .map(item => item.trim())
         .filter(Boolean);
-      const concurrency = Number(data.get("nConcurrent") || 10);
+      const concurrency = Number(data.get("nConcurrent") || 3);
       return {
         name: String(data.get("name") || "").trim(),
         datasetRef: String(data.get("datasetRef") || "").trim(),
@@ -1136,7 +1215,7 @@ INDEX_HTML = """<!doctype html>
       form.elements.name.value = "swe-bench-verified-6-split";
       form.elements.datasetRef.value = "/root/projects/agent-eval-orchestrator/datasets/swe-bench-verified";
       form.elements.agentName.value = "bitfun-cli";
-      form.elements.nConcurrent.value = "10";
+      form.elements.nConcurrent.value = "3";
       form.elements.jobsDir.value = "/root/projects/harbor/jobs";
       form.elements.selectedCaseIds.value = [
         "sphinx-doc__sphinx-8269",

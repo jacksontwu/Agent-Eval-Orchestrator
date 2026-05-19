@@ -213,7 +213,7 @@ http://127.0.0.1:7369/
 ## 运行说明
 
 - 页面创建分布式任务时，controller 会按 worker 平均切分 case。
-- 每个 worker 的并发度由任务里的 `Per Worker Concurrency` 控制。
+- 每个 worker 的并发度由任务里的 `Per Worker Concurrency` 控制，默认值为 `3`。
 - 如果某台 worker 当前 `slots_used == slots_total`，新的 batch 会排队，直到这台 worker 空闲。
 - worker 执行完成后，会把 Harbor jobs 回收到 controller，再按 task 名合并成单个 Harbor job。
 

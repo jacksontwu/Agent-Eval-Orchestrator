@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from agent_eval_orchestrator.core.defaults import (
     DEFAULT_HARBOR_REPO,
     DEFAULT_HOST,
+    DEFAULT_PER_WORKER_CONCURRENCY,
     DEFAULT_PORT,
     DEFAULT_PRESET_DATASETS,
 )
@@ -328,7 +329,7 @@ def _build_executor_config(
         uv_binary_by_worker[worker_id] = _default_uv_for_worker(worker_id, worker)
         mounts_by_worker[worker_id] = _default_bitfun_mounts(worker_id, worker)
         agent_env_by_worker[worker_id] = {"XDG_CONFIG_HOME": "/testbed/.config"}
-    n_concurrent = int(body_config.get("nConcurrent") or 10)
+    n_concurrent = int(body_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
     return {
         "agentName": str(body_config.get("agentName") or DEFAULT_AGENT_NAME),
         "envType": "docker",
@@ -605,6 +606,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/workers":
             _json_response(self, self.store.list_workers())
             return
+        if path == "/api/workers/runtime":
+            _json_response(self, self.store.list_worker_runtime_status())
+            return
         if path == "/api/datasets":
             _json_response(
                 self,
@@ -724,7 +728,11 @@ class Handler(BaseHTTPRequestHandler):
                     run_id=str(run["run_id"]),
                     selected_case_ids=case_ids,
                     worker_ids=worker_ids,
-                    batch_options={"concurrency": int(body_config.get("nConcurrent") or 10)},
+                    batch_options={
+                        "concurrency": int(
+                            body_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY
+                        )
+                    },
                 )
             except KeyError as exc:
                 _json_response(self, {"error": f"missing field: {exc}"}, 400)
