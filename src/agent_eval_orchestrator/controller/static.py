@@ -545,7 +545,6 @@ INDEX_HTML = """<!doctype html>
 
             <div class="actions">
               <button class="primary" type="submit">创建并分发任务</button>
-              <button class="ghost" type="button" id="createPrefillRealBtn">填充 SWE-Bench 6 case 示例</button>
             </div>
           </form>
 
@@ -1209,24 +1208,6 @@ INDEX_HTML = """<!doctype html>
       await loadDashboard();
     }
 
-    function prefillRealExample() {
-      const form = document.getElementById("createTaskForm");
-      if (!form) return;
-      form.elements.name.value = "swe-bench-verified-6-split";
-      form.elements.datasetRef.value = "/root/projects/agent-eval-orchestrator/datasets/swe-bench-verified";
-      form.elements.agentName.value = "bitfun-cli";
-      form.elements.nConcurrent.value = "3";
-      form.elements.jobsDir.value = "/root/projects/harbor/jobs";
-      form.elements.selectedCaseIds.value = [
-        "sphinx-doc__sphinx-8269",
-        "sphinx-doc__sphinx-7757",
-        "django__django-13410",
-        "django__django-15022",
-        "astropy__astropy-14369",
-        "django__django-14373",
-      ].join("\\n");
-    }
-
     document.querySelectorAll(".tab").forEach(btn => {
       btn.addEventListener("click", () => setTab(btn.dataset.tab));
     });
@@ -1243,7 +1224,6 @@ INDEX_HTML = """<!doctype html>
       renderTaskList();
     });
     document.getElementById("createTaskForm").addEventListener("submit", submitCreateTaskForm);
-    document.getElementById("createPrefillRealBtn").addEventListener("click", prefillRealExample);
     document.getElementById("previewModalClose").addEventListener("click", closePreviewModal);
     document.getElementById("previewModal").addEventListener("click", (event) => {
       if (event.target.id === "previewModal") {

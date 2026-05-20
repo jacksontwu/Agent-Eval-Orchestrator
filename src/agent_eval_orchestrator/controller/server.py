@@ -228,11 +228,16 @@ def _job_sources_for_run(
     sources: list[Path] = []
     for batch in store.list_batches_for_run(run_id):
         artifact_index = batch.get("artifact_index") or {}
-        candidates = [
-            Path(str(artifact_index.get("jobDir") or "")).expanduser(),
-            imported_root / str(batch["batch_id"]),
-            jobs_dir / str(batch["batch_id"]),
-        ]
+        candidates: list[Path] = []
+        raw_job_dir = str(artifact_index.get("jobDir") or "").strip()
+        if raw_job_dir:
+            candidates.append(Path(raw_job_dir).expanduser())
+        candidates.extend(
+            [
+                imported_root / str(batch["batch_id"]),
+                jobs_dir / str(batch["batch_id"]),
+            ]
+        )
         source = next(
             (path.resolve() for path in candidates if str(path).strip() and path.exists()),
             None,
@@ -414,11 +419,16 @@ class Handler(BaseHTTPRequestHandler):
                 merged_job_dir = jobs_dir / merged_job_name
                 if merged_job_dir.exists():
                     shutil.rmtree(merged_job_dir)
-                _write_merged_job(
-                    merged_job_dir=merged_job_dir,
-                    merged_job_name=merged_job_name,
-                    source_job_dirs=source_job_dirs,
-                )
+                try:
+                    _write_merged_job(
+                        merged_job_dir=merged_job_dir,
+                        merged_job_name=merged_job_name,
+                        source_job_dirs=source_job_dirs,
+                    )
+                except RuntimeError:
+                    if merged_job_dir.exists():
+                        shutil.rmtree(merged_job_dir)
+                    continue
                 merged_names.append(merged_job_name)
                 for batch in self.store.list_batches_for_run(str(run["run_id"])):
                     legacy_batch_dir = jobs_dir / str(batch["batch_id"])
