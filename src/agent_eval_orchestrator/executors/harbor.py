@@ -103,6 +103,23 @@ class HarborExecutor(Executor):
         agent_env = self._resolve_worker_override(executor_config, worker_id, "agentEnv", {}) or {}
         for key, value in sorted(agent_env.items()):
             harbor_args.extend(["--ae", f"{key}={value}"])
+        timeout_multiplier = executor_config.get("timeoutMultiplier")
+        if timeout_multiplier is not None:
+            harbor_args.extend(["--timeout-multiplier", str(timeout_multiplier)])
+        agent_timeout_multiplier = executor_config.get("agentTimeoutMultiplier")
+        if agent_timeout_multiplier is not None:
+            harbor_args.extend(["--agent-timeout-multiplier", str(agent_timeout_multiplier)])
+        verifier_timeout_multiplier = executor_config.get("verifierTimeoutMultiplier")
+        if verifier_timeout_multiplier is not None:
+            harbor_args.extend(["--verifier-timeout-multiplier", str(verifier_timeout_multiplier)])
+        agent_setup_timeout_multiplier = executor_config.get("agentSetupTimeoutMultiplier")
+        if agent_setup_timeout_multiplier is not None:
+            harbor_args.extend(["--agent-setup-timeout-multiplier", str(agent_setup_timeout_multiplier)])
+        environment_build_timeout_multiplier = executor_config.get("environmentBuildTimeoutMultiplier")
+        if environment_build_timeout_multiplier is not None:
+            harbor_args.extend(
+                ["--environment-build-timeout-multiplier", str(environment_build_timeout_multiplier)]
+            )
         mounts = self._resolve_worker_override(executor_config, worker_id, "mounts", None)
         if mounts:
             harbor_args.extend(["--mounts", json.dumps(mounts, ensure_ascii=False)])

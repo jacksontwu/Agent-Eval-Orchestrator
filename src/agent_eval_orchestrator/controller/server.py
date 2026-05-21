@@ -19,11 +19,15 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from agent_eval_orchestrator.core.defaults import (
+    DEFAULT_AGENT_TIMEOUT_MULTIPLIER,
+    DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER,
     DEFAULT_HARBOR_REPO,
     DEFAULT_HOST,
     DEFAULT_PER_WORKER_CONCURRENCY,
     DEFAULT_PORT,
     DEFAULT_PRESET_DATASETS,
+    DEFAULT_TIMEOUT_MULTIPLIER,
+    DEFAULT_VERIFIER_TIMEOUT_MULTIPLIER,
 )
 from agent_eval_orchestrator.core.ids import now_iso, sanitize_name
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
@@ -335,10 +339,36 @@ def _build_executor_config(
         mounts_by_worker[worker_id] = _default_bitfun_mounts(worker_id, worker)
         agent_env_by_worker[worker_id] = {"XDG_CONFIG_HOME": "/testbed/.config"}
     n_concurrent = int(body_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
+    timeout_multiplier = body_config.get("timeoutMultiplier")
+    agent_timeout_multiplier = body_config.get("agentTimeoutMultiplier")
+    verifier_timeout_multiplier = body_config.get("verifierTimeoutMultiplier")
+    agent_setup_timeout_multiplier = body_config.get("agentSetupTimeoutMultiplier")
+    environment_build_timeout_multiplier = body_config.get("environmentBuildTimeoutMultiplier")
     return {
         "agentName": str(body_config.get("agentName") or DEFAULT_AGENT_NAME),
         "envType": "docker",
         "nConcurrent": n_concurrent,
+        "timeoutMultiplier": (
+            float(timeout_multiplier) if timeout_multiplier not in (None, "") else DEFAULT_TIMEOUT_MULTIPLIER
+        ),
+        "agentTimeoutMultiplier": (
+            float(agent_timeout_multiplier)
+            if agent_timeout_multiplier not in (None, "")
+            else DEFAULT_AGENT_TIMEOUT_MULTIPLIER
+        ),
+        "verifierTimeoutMultiplier": (
+            float(verifier_timeout_multiplier)
+            if verifier_timeout_multiplier not in (None, "")
+            else DEFAULT_VERIFIER_TIMEOUT_MULTIPLIER
+        ),
+        "agentSetupTimeoutMultiplier": (
+            float(agent_setup_timeout_multiplier) if agent_setup_timeout_multiplier not in (None, "") else None
+        ),
+        "environmentBuildTimeoutMultiplier": (
+            float(environment_build_timeout_multiplier)
+            if environment_build_timeout_multiplier not in (None, "")
+            else DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER
+        ),
         "harborRepoPathByWorker": harbor_repo_by_worker,
         "datasetPathByWorker": dataset_path_by_worker,
         "uvBinaryByWorker": uv_binary_by_worker,

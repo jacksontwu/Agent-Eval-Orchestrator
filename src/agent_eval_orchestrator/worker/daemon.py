@@ -16,6 +16,7 @@ from urllib import request
 
 from agent_eval_orchestrator.core.defaults import (
     DEFAULT_HARBOR_REPO,
+    DEFAULT_MIN_FREE_DISK_GB,
     DEFAULT_POLL_INTERVAL_SEC,
     DEFAULT_SHARED_ROOT,
     DEFAULT_SLOTS,
@@ -50,6 +51,27 @@ class ActiveBatch:
         self.prepared = prepared
 
 
+def _format_gb(value: int) -> str:
+    return f"{value / (1024 ** 3):.1f} GiB"
+
+
+def _check_free_disk(local_root: Path, min_free_bytes: int) -> list[str]:
+    problems: list[str] = []
+    local_usage = shutil.disk_usage(local_root)
+    if local_usage.free < min_free_bytes:
+        problems.append(
+            f"local-root free space too low: {_format_gb(local_usage.free)} < {_format_gb(min_free_bytes)}"
+        )
+    docker_root = Path("/var/lib/docker")
+    if docker_root.exists():
+        docker_usage = shutil.disk_usage(docker_root)
+        if docker_usage.free < min_free_bytes:
+            problems.append(
+                f"docker-root free space too low: {_format_gb(docker_usage.free)} < {_format_gb(min_free_bytes)}"
+            )
+    return problems
+
+
 def _tar_directory(path: Path) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
@@ -67,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--local-root", default="")
     parser.add_argument("--slots", type=int, default=DEFAULT_SLOTS)
     parser.add_argument("--poll-interval", type=int, default=DEFAULT_POLL_INTERVAL_SEC)
+    parser.add_argument("--min-free-disk-gb", type=int, default=DEFAULT_MIN_FREE_DISK_GB)
     parser.add_argument("--auth-token", default=None)
     args = parser.parse_args(argv)
 
@@ -74,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     shared_layout = default_layout(shared_root)
     local_root = Path(args.local_root or (shared_root / "workers" / args.worker_id / "local")).expanduser().resolve()
     local_root.mkdir(parents=True, exist_ok=True)
+    min_free_bytes = int(args.min_free_disk_gb) * (1024 ** 3)
     active: dict[str, ActiveBatch] = {}
     stop_requested = False
 
@@ -204,6 +228,24 @@ def main(argv: list[str] | None = None) -> int:
             }
             batch_local_root = local_root / str(batch["batch_id"])
             batch_local_root.mkdir(parents=True, exist_ok=True)
+            disk_problems = _check_free_disk(local_root, min_free_bytes)
+            if disk_problems:
+                error_text = "; ".join(disk_problems)
+                log(f"refusing batch {batch['batch_id']}: {error_text}")
+                shutil.rmtree(batch_local_root, ignore_errors=True)
+                post_json(
+                    f"{args.controller_url}/api/workers/heartbeat",
+                    {
+                        "workerId": args.worker_id,
+                        "batchId": str(batch["batch_id"]),
+                        "status": "failed",
+                        "currentStep": "executor-starting",
+                        "finished": True,
+                        "errorText": error_text,
+                    },
+                    auth_token=str(args.auth_token or "") or None,
+                )
+                continue
             prepared = HarborExecutor().prepare(
                 batch=batch,
                 run=run,

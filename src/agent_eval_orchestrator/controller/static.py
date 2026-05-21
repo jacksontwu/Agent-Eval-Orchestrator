@@ -416,7 +416,7 @@ INDEX_HTML = """<!doctype html>
     <div class="header">
       <div>
         <h1>Agent Eval Orchestrator</h1>
-        <p>页面版本 2026-05-19-1 · Workers 页展示运行状态与排队情况</p>
+        <p>页面版本 2026-05-21-1 · timeout 配置、磁盘保护与失败占位状态已更新</p>
       </div>
       <div class="header-actions">
         <a class="primary" id="openCreateBtn" href="/create">创建分布式任务</a>
@@ -517,7 +517,26 @@ INDEX_HTML = """<!doctype html>
               </div>
               <div class="field">
                 <label>Per Worker Concurrency</label>
-                <input name="nConcurrent" type="number" min="1" value="3" required />
+                <input name="nConcurrent" type="number" min="1" value="1" required />
+              </div>
+            </div>
+
+            <div class="detail-grid" style="margin-bottom:16px">
+              <div class="field">
+                <label>Timeout Multiplier</label>
+                <input name="timeoutMultiplier" type="number" min="0.1" step="0.1" value="1.0" />
+              </div>
+              <div class="field">
+                <label>Agent Timeout Multiplier</label>
+                <input name="agentTimeoutMultiplier" type="number" min="0.1" step="0.1" value="3.0" />
+              </div>
+              <div class="field">
+                <label>Verifier Timeout Multiplier</label>
+                <input name="verifierTimeoutMultiplier" type="number" min="0.1" step="0.1" value="2.0" />
+              </div>
+              <div class="field">
+                <label>Environment Build Multiplier</label>
+                <input name="environmentBuildTimeoutMultiplier" type="number" min="0.1" step="0.1" value="1.5" />
               </div>
             </div>
 
@@ -595,7 +614,8 @@ INDEX_HTML = """<!doctype html>
       let cls = "idle";
       if (["online", "finished", "succeeded", "completed", "enabled"].includes(lower)) cls = "ok";
       else if (["running", "queued"].includes(lower)) cls = "warn";
-      else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed"].includes(lower)) cls = "bad";
+      else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed", "interrupted"].includes(lower)) cls = "bad";
+      else if (["missing-result"].includes(lower)) cls = "warn";
       return '<span class="badge ' + cls + '">' + value + "</span>";
     }
 
@@ -605,6 +625,11 @@ INDEX_HTML = """<!doctype html>
 
     function fmtMetric(value) {
       return value == null ? "n/a" : Number(value).toLocaleString();
+    }
+
+    function parsePositiveNumber(value, fallback = null) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
     }
 
     function fmtTrace(item) {
@@ -1174,7 +1199,7 @@ INDEX_HTML = """<!doctype html>
         .split(/[\\n,]/)
         .map(item => item.trim())
         .filter(Boolean);
-      const concurrency = Number(data.get("nConcurrent") || 3);
+      const concurrency = Number(data.get("nConcurrent") || 1);
       return {
         name: String(data.get("name") || "").trim(),
         datasetRef: String(data.get("datasetRef") || "").trim(),
@@ -1187,6 +1212,13 @@ INDEX_HTML = """<!doctype html>
         executorConfig: {
           agentName: "bitfun-cli",
           nConcurrent: concurrency,
+          timeoutMultiplier: parsePositiveNumber(data.get("timeoutMultiplier"), 1.0),
+          agentTimeoutMultiplier: parsePositiveNumber(data.get("agentTimeoutMultiplier"), 3.0),
+          verifierTimeoutMultiplier: parsePositiveNumber(data.get("verifierTimeoutMultiplier"), 2.0),
+          environmentBuildTimeoutMultiplier: parsePositiveNumber(
+            data.get("environmentBuildTimeoutMultiplier"),
+            1.5,
+          ),
         },
       };
     }

@@ -804,6 +804,8 @@ class Store:
                 placeholder_status = (
                     "running" if batch["status"] == "running"
                     else "queued" if batch["status"] == "queued"
+                    else "interrupted" if batch["status"] == "failed"
+                    else "missing-result" if batch["status"] == "succeeded"
                     else "pending"
                 )
                 group["cases"].append(
