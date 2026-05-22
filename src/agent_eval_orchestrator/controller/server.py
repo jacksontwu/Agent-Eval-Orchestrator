@@ -894,6 +894,7 @@ class Handler(BaseHTTPRequestHandler):
                 worker_id=worker_id,
                 display_name=str(body.get("displayName") or "") or None,
                 slots_total=int(body["slotsTotal"]) if body.get("slotsTotal") is not None else None,
+                allocation_weight=float(body["allocationWeight"]) if body.get("allocationWeight") is not None else None,
                 enabled=bool(body["enabled"]) if body.get("enabled") is not None else None,
                 note=str(body.get("note") or "") if body.get("note") is not None else None,
                 tags=[str(item) for item in body.get("tags") or []] if isinstance(body.get("tags"), list) else None,

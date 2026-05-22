@@ -553,7 +553,7 @@ INDEX_HTML = """<!doctype html>
 
             <div class="field" style="margin-bottom:16px">
               <label>Selected Case IDs（每行一个，可空）</label>
-              <textarea name="selectedCaseIds" placeholder="留空则执行全量 dataset，并平均分配给选中的 worker&#10;astropy__astropy-12907&#10;astropy__astropy-13033"></textarea>
+              <textarea name="selectedCaseIds" placeholder="留空则执行全量 dataset，并按 worker 容量自动分配&#10;astropy__astropy-12907&#10;astropy__astropy-13033"></textarea>
             </div>
 
             <div style="margin-bottom:16px">
@@ -648,6 +648,11 @@ INDEX_HTML = """<!doctype html>
       const min = Math.floor(sec / 60);
       const rem = sec % 60;
       return min + "m " + rem + "s";
+    }
+
+    function formatGiB(bytes) {
+      if (bytes == null || bytes === 0) return "-";
+      return (Number(bytes) / (1024 ** 3)).toFixed(1) + " GiB";
     }
 
     function esc(value) {
@@ -1051,6 +1056,7 @@ INDEX_HTML = """<!doctype html>
               '<span>workerId: <code>' + esc(worker.worker_id) + '</code></span>' +
               '<span>host: <code>' + esc(worker.host || "-") + '</code></span>' +
               '<span>slots: ' + esc(worker.slots_used + "/" + worker.slots_total) + '</span>' +
+              '<span>capacity: ' + esc(worker.allocationScore ?? "-") + '</span>' +
             '</div>' +
           '</div>';
       }).join('') + '</div>';
@@ -1143,6 +1149,8 @@ INDEX_HTML = """<!doctype html>
           '<div class="stat"><div class="subtle">Host</div><strong class="subtle">' + esc(worker.host) + '</strong></div>' +
           '<div class="stat"><div class="subtle">Status</div><strong>' + badge(worker.status) + '</strong></div>' +
           '<div class="stat"><div class="subtle">Heartbeat</div><strong class="subtle">' + esc(worker.last_heartbeat_at || "-") + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Capacity Score</div><strong>' + esc(worker.allocationScore ?? "-") + '</strong></div>' +
+          '<div class="stat"><div class="subtle">CPU / Memory</div><strong class="subtle">' + esc((worker.capabilities?.cpuCount || "-") + ' / ' + formatGiB(worker.capabilities?.memoryTotalBytes)) + '</strong></div>' +
           '<div class="stat"><div class="subtle">Running</div><strong>' + esc(runtime.runningCount ?? 0) + '</strong></div>' +
           '<div class="stat"><div class="subtle">Queued</div><strong>' + esc(runtime.queuedCount ?? 0) + '</strong></div>' +
           '<div class="stat"><div class="subtle">Available Slots</div><strong>' + esc(runtime.availableSlots ?? Math.max(0, worker.slots_total - worker.slots_used)) + '</strong></div>' +
@@ -1157,6 +1165,7 @@ INDEX_HTML = """<!doctype html>
         '<form id="workerForm">' +
           '<div class="field"><label>显示名称</label><input name="displayName" value="' + esc(worker.display_name) + '" /></div>' +
           '<div class="field"><label>Slots</label><input name="slotsTotal" type="number" min="1" value="' + esc(worker.slots_total) + '" /></div>' +
+          '<div class="field"><label>分配权重覆盖（可选）</label><input name="allocationWeight" type="number" min="0.1" step="0.1" placeholder="自动" /></div>' +
           '<div class="field"><label>标签（逗号分隔）</label><input name="tags" value="' + esc((worker.tags || []).join(", ")) + '" /></div>' +
           '<div class="field"><label>备注</label><textarea name="note">' + esc(worker.note || "") + '</textarea></div>' +
           '<div class="actions">' +
@@ -1175,6 +1184,7 @@ INDEX_HTML = """<!doctype html>
           body: JSON.stringify({
             displayName: form.get("displayName"),
             slotsTotal: Number(form.get("slotsTotal")),
+            allocationWeight: form.get("allocationWeight") ? Number(form.get("allocationWeight")) : null,
             tags: String(form.get("tags") || "").split(",").map(s => s.trim()).filter(Boolean),
             note: form.get("note"),
           }),

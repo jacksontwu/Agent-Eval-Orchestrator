@@ -105,6 +105,7 @@ class Store:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     note TEXT NOT NULL DEFAULT '',
                     tags_json TEXT NOT NULL DEFAULT '[]',
+                    allocation_weight REAL NOT NULL DEFAULT 1.0,
                     last_heartbeat_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -129,6 +130,10 @@ class Store:
             if "tags_json" not in worker_columns:
                 conn.execute(
                     "ALTER TABLE workers ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "allocation_weight" not in worker_columns:
+                conn.execute(
+                    "ALTER TABLE workers ADD COLUMN allocation_weight REAL NOT NULL DEFAULT 1.0"
                 )
             self._drop_case_details_column_if_present(conn)
 
@@ -320,10 +325,7 @@ class Store:
             raise RuntimeError("worker_ids must not be empty")
         options = dict(batch_options or {})
         max_concurrency = int(options.get("concurrency") or DEFAULT_PER_WORKER_CONCURRENCY)
-        shard_count = len(worker_ids)
-        case_groups = [[] for _ in range(shard_count)]
-        for index, case_id in enumerate(selected_case_ids):
-            case_groups[index % shard_count].append(case_id)
+        case_groups = self._weighted_case_groups(selected_case_ids, worker_ids)
         created: list[dict[str, Any]] = []
         for worker_id, case_ids in zip(worker_ids, case_groups):
             if not case_ids:
@@ -337,6 +339,58 @@ class Store:
                 )
             )
         return created
+
+    def _weighted_case_groups(
+        self,
+        selected_case_ids: list[str],
+        worker_ids: list[str],
+    ) -> list[list[str]]:
+        workers = {item["worker_id"]: item for item in self.list_workers()}
+        weights = [
+            self._worker_allocation_score(workers.get(worker_id) or {})
+            for worker_id in worker_ids
+        ]
+        if not any(weight > 0 for weight in weights):
+            weights = [1.0 for _ in worker_ids]
+        total_weight = sum(weights)
+        exact_shares = [len(selected_case_ids) * weight / total_weight for weight in weights]
+        quotas = [int(share) for share in exact_shares]
+        remaining = len(selected_case_ids) - sum(quotas)
+        remainders = sorted(
+            range(len(worker_ids)),
+            key=lambda index: exact_shares[index] - quotas[index],
+            reverse=True,
+        )
+        for index in remainders[:remaining]:
+            quotas[index] += 1
+
+        groups: list[list[str]] = [[] for _ in worker_ids]
+        smooth_scores = [0.0 for _ in worker_ids]
+        for case_id in selected_case_ids:
+            candidates = [index for index, quota in enumerate(quotas) if quota > 0]
+            if not candidates:
+                break
+            for index in candidates:
+                smooth_scores[index] += weights[index]
+            chosen = max(
+                candidates,
+                key=lambda index: (smooth_scores[index], quotas[index], -index),
+            )
+            groups[chosen].append(case_id)
+            quotas[chosen] -= 1
+            smooth_scores[chosen] -= total_weight
+        return groups
+
+    @staticmethod
+    def _worker_allocation_score(worker: dict[str, Any]) -> float:
+        capabilities = dict(worker.get("capabilities") or {})
+        slots_total = max(1.0, float(worker.get("slots_total") or capabilities.get("slotsTotal") or 1))
+        cpu_count = max(1.0, float(capabilities.get("cpuCount") or 1))
+        memory_gib = max(1.0, float(capabilities.get("memoryTotalBytes") or 0) / (1024 ** 3))
+        override = float(worker.get("allocation_weight") or 1.0)
+        # CPU dominates throughput; memory adds a smaller smoothing term so
+        # larger machines get more work without making the split too extreme.
+        return max(0.1, slots_total * (cpu_count + (memory_gib / 8.0)) * override)
 
     def list_dataset_case_ids(self, dataset_ref: str) -> list[str]:
         dataset_path = Path(dataset_ref).expanduser().resolve()
@@ -382,6 +436,8 @@ class Store:
                 (worker_id,),
             ).fetchone()
             if existing:
+                merged_capabilities = json.loads(existing["capabilities_json"] or "{}")
+                merged_capabilities.update(capabilities)
                 conn.execute(
                     """
                     UPDATE workers
@@ -394,7 +450,7 @@ class Store:
                         host,
                         slots_total,
                         slots_used,
-                        json.dumps(capabilities, ensure_ascii=False),
+                        json.dumps(merged_capabilities, ensure_ascii=False),
                         status,
                         now,
                         now,
@@ -657,6 +713,7 @@ class Store:
         worker_id: str,
         display_name: str | None = None,
         slots_total: int | None = None,
+        allocation_weight: float | None = None,
         enabled: bool | None = None,
         note: str | None = None,
         tags: list[str] | None = None,
@@ -673,6 +730,7 @@ class Store:
                 UPDATE workers
                 SET display_name = COALESCE(?, display_name),
                     slots_total = COALESCE(?, slots_total),
+                    allocation_weight = COALESCE(?, allocation_weight),
                     enabled = COALESCE(?, enabled),
                     note = COALESCE(?, note),
                     tags_json = COALESCE(?, tags_json),
@@ -682,6 +740,7 @@ class Store:
                 (
                     display_name,
                     slots_total,
+                    allocation_weight,
                     1 if enabled is True else 0 if enabled is False else None,
                     note,
                     json.dumps(tags, ensure_ascii=False) if tags is not None else None,
@@ -962,4 +1021,5 @@ class Store:
                 status = "unavailable"
         item["status"] = status
         item["manualStatus"] = "enabled" if item.get("enabled", True) else "disabled"
+        item["allocationScore"] = round(self._worker_allocation_score(item), 2)
         return item

@@ -212,7 +212,8 @@ http://127.0.0.1:7369/
 
 ## 运行说明
 
-- 页面创建分布式任务时，controller 会按 worker 平均切分 case。
+- 页面创建分布式任务时，controller 会按 worker 自动上报的机器容量指标（CPU / 内存 / slots）做平滑分配。
+- 如有需要，也可以在 Workers 页给单台机器设置额外的分配权重覆盖。
 - 每个 worker 的并发度由任务里的 `Per Worker Concurrency` 控制，默认值为 `1`。
 - `Agent Timeout Multiplier` 默认值为 `3.0`，用于降低 terminal-bench 长任务的 agent 超时概率。
 - 如果某台 worker 当前 `slots_used == slots_total`，新的 batch 会排队，直到这台 worker 空闲。

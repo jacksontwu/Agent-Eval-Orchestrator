@@ -72,6 +72,34 @@ def _check_free_disk(local_root: Path, min_free_bytes: int) -> list[str]:
     return problems
 
 
+def _read_mem_total_bytes() -> int:
+    meminfo = Path("/proc/meminfo")
+    if not meminfo.exists():
+        return 0
+    for line in meminfo.read_text().splitlines():
+        if line.startswith("MemTotal:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                return int(parts[1]) * 1024
+    return 0
+
+
+def _collect_capabilities(shared_root: Path, local_root: Path, slots_total: int) -> dict[str, object]:
+    local_usage = shutil.disk_usage(local_root)
+    docker_root = Path("/var/lib/docker")
+    docker_free_bytes = shutil.disk_usage(docker_root).free if docker_root.exists() else 0
+    return {
+        "sharedRoot": str(shared_root),
+        "localRoot": str(local_root),
+        "defaultHarborRepo": str(DEFAULT_HARBOR_REPO),
+        "cpuCount": int(os.cpu_count() or 1),
+        "memoryTotalBytes": _read_mem_total_bytes(),
+        "localFreeBytes": int(local_usage.free),
+        "dockerFreeBytes": int(docker_free_bytes),
+        "slotsTotal": int(slots_total),
+    }
+
+
 def _tar_directory(path: Path) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
@@ -111,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
 
     while not stop_requested:
         try:
+            capabilities = _collect_capabilities(shared_root, local_root, args.slots)
             post_json(
                 f"{args.controller_url}/api/workers/register",
                 {
@@ -119,11 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                     "host": args.host,
                     "slotsTotal": args.slots,
                     "slotsUsed": len(active),
-                    "capabilities": {
-                        "sharedRoot": str(shared_root),
-                        "localRoot": str(local_root),
-                        "defaultHarborRepo": str(DEFAULT_HARBOR_REPO),
-                    },
+                    "capabilities": capabilities,
                 },
                 auth_token=str(args.auth_token or "") or None,
             )
