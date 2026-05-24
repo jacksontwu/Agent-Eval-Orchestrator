@@ -271,15 +271,33 @@ def main(argv: list[str] | None = None) -> int:
                     auth_token=str(args.auth_token or "") or None,
                 )
                 continue
-            prepared = HarborExecutor().prepare(
-                batch=batch,
-                run=run,
-                template=template,
-                dataset_ref=str(task["datasetRef"]),
-                executor_config=dict(task["executorConfig"]),
-                local_root=batch_local_root,
-                shared_root=shared_root,
-            )
+            try:
+                prepared = HarborExecutor().prepare(
+                    batch=batch,
+                    run=run,
+                    template=template,
+                    dataset_ref=str(task["datasetRef"]),
+                    executor_config=dict(task["executorConfig"]),
+                    local_root=batch_local_root,
+                    shared_root=shared_root,
+                )
+            except Exception as exc:
+                error_text = f"prepare failed: {exc}"
+                log(f"refusing batch {batch['batch_id']}: {error_text}")
+                shutil.rmtree(batch_local_root, ignore_errors=True)
+                post_json(
+                    f"{args.controller_url}/api/workers/heartbeat",
+                    {
+                        "workerId": args.worker_id,
+                        "batchId": str(batch["batch_id"]),
+                        "status": "failed",
+                        "currentStep": "executor-starting",
+                        "finished": True,
+                        "errorText": error_text,
+                    },
+                    auth_token=str(args.auth_token or "") or None,
+                )
+                continue
             log_file = prepared.worker_log_path.open("a", encoding="utf-8")
             env = os.environ.copy()
             env.update(prepared.env)

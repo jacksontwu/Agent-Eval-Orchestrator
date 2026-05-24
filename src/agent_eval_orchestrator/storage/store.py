@@ -510,19 +510,23 @@ class Store:
         template_id: str,
         patch: dict[str, Any],
     ) -> dict[str, Any]:
-        template = self.get_task_template(template_id)
-        if not template:
-            raise RuntimeError("template not found")
-        config = dict(template["executor_config"])
-        for key, value in patch.items():
-            if isinstance(value, dict) and isinstance(config.get(key), dict):
-                merged = dict(config[key])
-                merged.update(value)
-                config[key] = merged
-            else:
-                config[key] = value
         now = now_iso()
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT executor_config_json FROM task_templates WHERE template_id = ?",
+                (template_id,),
+            ).fetchone()
+            if not row:
+                raise RuntimeError("template not found")
+            config = json.loads(row["executor_config_json"])
+            for key, value in patch.items():
+                if isinstance(value, dict) and isinstance(config.get(key), dict):
+                    merged = dict(config[key])
+                    merged.update(value)
+                    config[key] = merged
+                else:
+                    config[key] = value
             conn.execute(
                 """
                 UPDATE task_templates
