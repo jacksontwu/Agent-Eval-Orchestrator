@@ -1100,6 +1100,67 @@ class Handler(BaseHTTPRequestHandler):
             return
         _json_response(self, {"error": "not found"}, 404)
 
+    def do_DELETE(self) -> None:
+        path = urlparse(self.path).path
+        if not self._is_authorized():
+            _json_response(self, {"error": "forbidden"}, 403)
+            return
+        parts = path.split("/")
+        if len(parts) == 4 and parts[1] == "api" and parts[2] == "workers":
+            worker_id = parts[3]
+            reserved = {"provision", "runtime", "register", "claim", "heartbeat", "job-archive"}
+            if worker_id in reserved:
+                _json_response(self, {"error": "not found"}, 404)
+                return
+            worker = next(
+                (item for item in self.store.list_workers() if item["worker_id"] == worker_id),
+                None,
+            )
+            if not worker:
+                _json_response(self, {"error": "worker not found"}, 404)
+                return
+            counts = self.store.worker_has_active_batches(worker_id)
+            if counts["runningCount"] > 0 or counts["queuedCount"] > 0:
+                _json_response(
+                    self,
+                    {
+                        "error": "worker has active batches",
+                        "runningCount": counts["runningCount"],
+                        "queuedCount": counts["queuedCount"],
+                    },
+                    409,
+                )
+                return
+            if self.provisioner is not None:
+                latest = self.store.get_latest_provision_job_for_worker(worker_id)
+                if latest and str(latest["status"]) in {"pending", "running"}:
+                    ssh_alias = str(worker.get("ssh_host_alias") or "")
+                    self.provisioner.cancel_job(
+                        str(latest["job_id"]),
+                        worker_id=worker_id,
+                        ssh_host_alias=ssh_alias,
+                    )
+                cleanup = self.provisioner.decommission_worker(
+                    worker_id=worker_id,
+                    ssh_host_alias=str(worker.get("ssh_host_alias") or "") or None,
+                )
+            else:
+                cleanup = {"remoteCleanup": "skipped", "warnings": []}
+            if not self.store.delete_worker(worker_id):
+                _json_response(self, {"error": "worker not found"}, 404)
+                return
+            payload: dict[str, object] = {
+                "ok": True,
+                "workerId": worker_id,
+                "remoteCleanup": cleanup.get("remoteCleanup", "skipped"),
+            }
+            warnings = cleanup.get("warnings") or []
+            if warnings:
+                payload["warnings"] = warnings
+            _json_response(self, payload)
+            return
+        _json_response(self, {"error": "not found"}, 404)
+
 
 class ThreadedServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True

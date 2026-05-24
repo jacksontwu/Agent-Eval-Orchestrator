@@ -191,11 +191,40 @@ class Provisioner:
         self._threads[job_id] = thread
         thread.start()
 
+    def decommission_worker(
+        self,
+        *,
+        worker_id: str,
+        ssh_host_alias: str | None,
+    ) -> dict[str, object]:
+        if not ssh_host_alias:
+            return {"remoteCleanup": "skipped", "warnings": []}
+        warnings: list[str] = []
+        try:
+            self.tunnels.kill_tunnel(worker_id)
+        except Exception as exc:
+            warnings.append(f"failed to kill tunnel: {exc}")
+        remote_cmd = f"pkill -f 'worker.daemon.*--worker-id {worker_id}' || true"
+        try:
+            result = self._ssh_run(
+                ssh_host_alias,
+                remote_cmd,
+                check=False,
+                connect_timeout_sec=10,
+            )
+            if result.returncode != 0 and result.stderr.strip():
+                warnings.append(f"ssh pkill failed: {result.stderr.strip()}")
+        except Exception as exc:
+            warnings.append(f"ssh pkill failed: {exc}")
+        remote_cleanup = "partial" if warnings else "done"
+        return {"remoteCleanup": remote_cleanup, "warnings": warnings}
+
     def cancel_job(self, job_id: str, *, worker_id: str, ssh_host_alias: str) -> None:
         self._cancelled.add(job_id)
-        self.tunnels.kill_tunnel(worker_id)
-        remote_cmd = f"pkill -f 'worker.daemon.*--worker-id {worker_id}' || true"
-        self._ssh_run(ssh_host_alias, remote_cmd, check=False)
+        self.decommission_worker(
+            worker_id=worker_id,
+            ssh_host_alias=ssh_host_alias or None,
+        )
         self.store.update_provision_job(job_id, status="cancelled", finished=True)
 
     def run_job(
@@ -299,8 +328,12 @@ class Provisioner:
         remote_command: str,
         *,
         check: bool = True,
+        connect_timeout_sec: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        cmd = [*self._ssh_base(), host_alias, remote_command]
+        cmd = [*self._ssh_base()]
+        if connect_timeout_sec is not None:
+            cmd.extend(["-o", f"ConnectTimeout={connect_timeout_sec}"])
+        cmd.extend([host_alias, remote_command])
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         self._log(result.stdout + result.stderr)
         if check and result.returncode != 0:

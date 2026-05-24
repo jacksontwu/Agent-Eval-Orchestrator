@@ -522,6 +522,18 @@ class Store:
             ).fetchone()
         return row is not None
 
+    def delete_worker(self, worker_id: str) -> bool:
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM workers WHERE worker_id = ?",
+                (worker_id,),
+            ).fetchone()
+            if not existing:
+                return False
+            conn.execute("DELETE FROM provision_jobs WHERE worker_id = ?", (worker_id,))
+            conn.execute("DELETE FROM workers WHERE worker_id = ?", (worker_id,))
+        return True
+
     def create_provisioning_worker(
         self,
         *,
@@ -697,6 +709,29 @@ class Store:
             rows = conn.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
         return [self._decorate_worker(self._worker_item(row)) for row in rows]
 
+    @staticmethod
+    def _batch_target_worker_id(batch: dict[str, Any], run: dict[str, Any] | None) -> str:
+        target = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip()
+        if not target and run:
+            target = str(run.get("bound_worker_id") or "").strip()
+        return target
+
+    def worker_has_active_batches(self, worker_id: str) -> dict[str, int]:
+        runs = {item["run_id"]: item for item in self.list_runs()}
+        running = 0
+        queued = 0
+        for batch in self.list_batches():
+            status = str(batch["status"])
+            run = runs.get(str(batch["run_id"]))
+            target = self._batch_target_worker_id(batch, run)
+            if target != worker_id:
+                continue
+            if status == "running":
+                running += 1
+            elif status == "queued":
+                queued += 1
+        return {"runningCount": running, "queuedCount": queued}
+
     def list_worker_runtime_status(self) -> dict[str, Any]:
         workers = {item["worker_id"]: item for item in self.list_workers()}
         runs = {item["run_id"]: item for item in self.list_runs()}
@@ -739,9 +774,7 @@ class Store:
         for batch in sorted(self.list_batches(), key=lambda item: str(item["created_at"])):
             status = str(batch["status"])
             run = runs.get(str(batch["run_id"]))
-            target_worker = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip()
-            if not target_worker and run:
-                target_worker = str(run.get("bound_worker_id") or "").strip()
+            target_worker = self._batch_target_worker_id(batch, run)
             if status == "running" and target_worker in worker_states:
                 worker_states[target_worker]["runningBatches"].append(batch_runtime_item(batch))
             elif status == "queued":

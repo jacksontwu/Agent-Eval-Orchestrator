@@ -329,6 +329,28 @@ INDEX_HTML = """<!doctype html>
       background: white;
       color: var(--fg);
     }
+    .danger {
+      background: var(--bad);
+      color: #fff;
+      border: 1px solid var(--bad);
+    }
+    .danger:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      background: #111827;
+      color: #fff;
+      padding: 12px 16px;
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+      z-index: 1000;
+      max-width: 420px;
+    }
+    .toast.hidden { display: none; }
     .actions {
       display: flex;
       gap: 10px;
@@ -608,6 +630,26 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
 
+  <div class="modal hidden" id="deleteWorkerModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3 id="deleteWorkerModalTitle">删除 Worker</h3>
+          <div class="subtle" id="deleteWorkerModalSubtitle"></div>
+        </div>
+        <button class="modal-close" id="deleteWorkerModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p id="deleteWorkerModalBody"></p>
+        <div class="actions">
+          <button class="danger" type="button" id="confirmDeleteWorkerBtn">确认删除</button>
+          <button class="ghost" type="button" id="cancelDeleteWorkerBtn">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="toast hidden" id="toast"></div>
+
   <script>
     const state = {
       tasks: [],
@@ -630,6 +672,7 @@ INDEX_HTML = """<!doctype html>
       provisionJob: null,
       sshHosts: [],
       addWorkerPhase: "form",
+      pendingDeleteWorkerId: null,
     };
 
     function badge(value) {
@@ -693,6 +736,52 @@ INDEX_HTML = """<!doctype html>
         throw new Error(text || ("HTTP " + res.status));
       }
       return res.json();
+    }
+
+    let toastTimer = null;
+    function showToast(message) {
+      const el = document.getElementById("toast");
+      el.textContent = message;
+      el.classList.remove("hidden");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.add("hidden"), 4000);
+    }
+
+    function closeDeleteWorkerModal() {
+      document.getElementById("deleteWorkerModal").classList.add("hidden");
+      state.pendingDeleteWorkerId = null;
+    }
+
+    function openDeleteWorkerModal(worker) {
+      state.pendingDeleteWorkerId = worker.worker_id;
+      const hasSsh = Boolean(worker.ssh_host_alias);
+      document.getElementById("deleteWorkerModalTitle").textContent =
+        '删除 Worker "' + worker.display_name + '"？';
+      let body = hasSsh
+        ? "将停止远程 daemon 和 SSH 隧道，并从列表移除。ECS 实例不会被销毁。"
+        : "该 worker 无 SSH 配置，仅会从 controller 移除，不会执行远程清理。";
+      if (worker.provision_status === "provisioning") {
+        body += " 将取消进行中的部署任务。";
+      }
+      document.getElementById("deleteWorkerModalBody").textContent = body;
+      document.getElementById("deleteWorkerModal").classList.remove("hidden");
+    }
+
+    async function confirmDeleteWorker() {
+      const workerId = state.pendingDeleteWorkerId;
+      if (!workerId) return;
+      const result = await api("/api/workers/" + encodeURIComponent(workerId), { method: "DELETE" });
+      closeDeleteWorkerModal();
+      state.selectedWorkerId = null;
+      await loadDashboard();
+      if (result.remoteCleanup === "skipped") {
+        showToast("Worker 已删除（未执行远程清理）");
+      } else if (result.remoteCleanup === "partial") {
+        const extra = (result.warnings || []).join("; ");
+        showToast("Worker 已删除，远程清理部分失败" + (extra ? "：" + extra : ""));
+      } else {
+        showToast("Worker 已删除");
+      }
     }
 
     function setTab(tab) {
@@ -1201,6 +1290,9 @@ INDEX_HTML = """<!doctype html>
           '<div class="actions">' +
             '<button class="primary" type="submit">保存配置</button>' +
             '<button class="ghost" type="button" id="toggleEnabledBtn">' + (worker.enabled ? "设为禁用" : "设为启用") + '</button>' +
+            '<button class="danger" type="button" id="deleteWorkerBtn"' +
+              ((runtime.runningCount || 0) > 0 || (runtime.queuedCount || 0) > 0 ? ' disabled title="请先等待或停止运行中的 batch"' : '') +
+            '>删除 Worker</button>' +
           '</div>' +
         '</form>' +
         (worker.provision_status === "failed" && worker.last_provision_job_id
@@ -1233,6 +1325,11 @@ INDEX_HTML = """<!doctype html>
         });
         await loadDashboard();
       });
+
+      const deleteBtn = root.querySelector("#deleteWorkerBtn");
+      if (deleteBtn && !deleteBtn.disabled) {
+        deleteBtn.addEventListener("click", () => openDeleteWorkerModal(worker));
+      }
 
       const viewLogBtn = root.querySelector("#viewProvisionLogBtn");
       if (viewLogBtn) {
@@ -1531,6 +1628,11 @@ INDEX_HTML = """<!doctype html>
     document.getElementById("addWorkerModalClose").addEventListener("click", closeAddWorkerModal);
     document.getElementById("addWorkerModal").addEventListener("click", (event) => {
       if (event.target.id === "addWorkerModal") closeAddWorkerModal();
+    });
+    document.getElementById("deleteWorkerModalClose").addEventListener("click", closeDeleteWorkerModal);
+    document.getElementById("cancelDeleteWorkerBtn").addEventListener("click", closeDeleteWorkerModal);
+    document.getElementById("confirmDeleteWorkerBtn").addEventListener("click", () => {
+      confirmDeleteWorker().catch(err => alert(err.message || String(err)));
     });
 
     setTab(window.location.pathname === "/create" ? "create" : "tasks");
