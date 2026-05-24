@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from agent_eval_orchestrator.storage.store import Store
 
 DEFAULT_TUNNEL_REMOTE_PORT = 17380
-DEFAULT_UV_BIN = "/home/djn/worker/.local/bin/uv"
+DEFAULT_UV_BIN = "/home/djn/.local/bin/uv"
 DEFAULT_AEO_DIR = "/home/djn/worker/agent-eval-orchestrator"
 DEFAULT_HARBOR_DIR = "/home/djn/worker/harbor"
 DEFAULT_WORKER_LOG_DIR = "/home/djn/worker/logs"
