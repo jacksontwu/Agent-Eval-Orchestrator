@@ -48,7 +48,7 @@ def build_daemon_start_command(
     worker_id: str,
     display_name: str,
     slots: int,
-    tunnel_remote_port: int,
+    controller_url: str,
     auth_token: str,
 ) -> str:
     local_root = f"{DEFAULT_AEO_DIR}/runtime/workers/{worker_id}/local"
@@ -57,7 +57,7 @@ def build_daemon_start_command(
         f"mkdir -p {DEFAULT_WORKER_LOG_DIR} && "
         f"cd {DEFAULT_AEO_DIR} && "
         f"setsid {DEFAULT_UV_BIN} run python -u -m agent_eval_orchestrator.worker.daemon "
-        f'--controller-url "http://127.0.0.1:{tunnel_remote_port}" '
+        f'--controller-url "{controller_url}" '
         f'--worker-id "{worker_id}" '
         f'--display-name "{display_name}" '
         f'--host "$(hostname -f || hostname)" '
@@ -96,9 +96,13 @@ JOIN_STEP_IDS = [
     "wait_register",
 ]
 
+TUNNEL_STEP_ID = "establish_tunnel"
 
-def initial_steps_for_mode(mode: str) -> list[dict[str, str]]:
+
+def initial_steps_for_mode(mode: str, *, connection_mode: str = "direct") -> list[dict[str, str]]:
     ids = FRESH_STEP_IDS if mode == "fresh" else JOIN_STEP_IDS
+    if connection_mode == "direct":
+        ids = [step_id for step_id in ids if step_id != TUNNEL_STEP_ID]
     return [{"id": step_id, "label": STEP_LABELS[step_id], "status": "pending"} for step_id in ids]
 
 
@@ -182,8 +186,8 @@ class Provisioner:
         self._cancelled: set[str] = set()
         self._current_job_id = ""
 
-    def initial_steps(self, mode: str) -> list[dict[str, str]]:
-        return initial_steps_for_mode(mode)
+    def initial_steps(self, mode: str, *, connection_mode: str = "direct") -> list[dict[str, str]]:
+        return initial_steps_for_mode(mode, connection_mode=connection_mode)
 
     def start_job_async(self, **kwargs: Any) -> None:
         job_id = str(kwargs["job_id"])
@@ -196,14 +200,16 @@ class Provisioner:
         *,
         worker_id: str,
         ssh_host_alias: str | None,
+        connection_mode: str = "tunnel",
     ) -> dict[str, object]:
         if not ssh_host_alias:
             return {"remoteCleanup": "skipped", "warnings": []}
         warnings: list[str] = []
-        try:
-            self.tunnels.kill_tunnel(worker_id)
-        except Exception as exc:
-            warnings.append(f"failed to kill tunnel: {exc}")
+        if connection_mode == "tunnel":
+            try:
+                self.tunnels.kill_tunnel(worker_id)
+            except Exception as exc:
+                warnings.append(f"failed to kill tunnel: {exc}")
         remote_cmd = f"pkill -f 'worker.daemon.*--worker-id {worker_id}' || true"
         try:
             result = self._ssh_run(
@@ -219,11 +225,19 @@ class Provisioner:
         remote_cleanup = "partial" if warnings else "done"
         return {"remoteCleanup": remote_cleanup, "warnings": warnings}
 
-    def cancel_job(self, job_id: str, *, worker_id: str, ssh_host_alias: str) -> None:
+    def cancel_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        ssh_host_alias: str,
+        connection_mode: str = "tunnel",
+    ) -> None:
         self._cancelled.add(job_id)
         self.decommission_worker(
             worker_id=worker_id,
             ssh_host_alias=ssh_host_alias or None,
+            connection_mode=connection_mode,
         )
         self.store.update_provision_job(job_id, status="cancelled", finished=True)
 
@@ -236,12 +250,14 @@ class Provisioner:
         ssh_host_alias: str,
         ssh_bootstrap_host_alias: str | None,
         djn_password: str | None,
-        tunnel_remote_port: int,
+        connection_mode: str = "direct",
+        controller_internal_ip: str | None = None,
+        tunnel_remote_port: int | None = None,
         display_name: str,
         slots_total: int,
     ) -> None:
         self._current_job_id = job_id
-        steps = self.initial_steps(mode)
+        steps = self.initial_steps(mode, connection_mode=connection_mode)
         self.store.update_provision_job(job_id, status="running", steps=steps)
 
         try:
@@ -261,11 +277,19 @@ class Provisioner:
             steps = self._run_step(
                 job_id, steps, "verify_layout", lambda: self._verify_layout(ssh_host_alias)
             )
-            steps = self._run_step(
-                job_id,
-                steps,
-                "establish_tunnel",
-                lambda: self._establish_tunnel(worker_id, ssh_host_alias, tunnel_remote_port),
+            if connection_mode == "tunnel":
+                steps = self._run_step(
+                    job_id,
+                    steps,
+                    "establish_tunnel",
+                    lambda: self._establish_tunnel(
+                        worker_id, ssh_host_alias, tunnel_remote_port or DEFAULT_TUNNEL_REMOTE_PORT
+                    ),
+                )
+            controller_url = (
+                f"http://{controller_internal_ip}:{self.controller_port}"
+                if connection_mode == "direct"
+                else f"http://127.0.0.1:{tunnel_remote_port or DEFAULT_TUNNEL_REMOTE_PORT}"
             )
             steps = self._run_step(
                 job_id,
@@ -276,7 +300,7 @@ class Provisioner:
                     worker_id=worker_id,
                     display_name=display_name,
                     slots_total=slots_total,
-                    tunnel_remote_port=tunnel_remote_port,
+                    controller_url=controller_url,
                 ),
             )
             steps = self._run_step(
@@ -285,6 +309,11 @@ class Provisioner:
                 "wait_register",
                 lambda: self._wait_for_register(worker_id),
             )
+            if connection_mode == "direct":
+                from agent_eval_orchestrator.controller.ssh_config import resolve_ssh_alias
+
+                entry = resolve_ssh_alias(self.ssh_config_path, ssh_host_alias)
+                self.store.update_worker_host(worker_id, entry.hostname)
             self.store.set_worker_provision_status(worker_id, provision_status="ready")
             self.store.update_provision_job(job_id, status="succeeded", steps=steps, finished=True)
         except Exception as exc:
@@ -300,7 +329,8 @@ class Provisioner:
                 error_text=str(exc),
                 finished=True,
             )
-            self.tunnels.kill_tunnel(worker_id)
+            if connection_mode == "tunnel":
+                self.tunnels.kill_tunnel(worker_id)
 
     def _run_step(
         self,
@@ -437,7 +467,7 @@ class Provisioner:
         worker_id: str,
         display_name: str,
         slots_total: int,
-        tunnel_remote_port: int,
+        controller_url: str,
     ) -> None:
         remote = (
             f"AEO_TOKEN={self.auth_token} "
@@ -445,7 +475,7 @@ class Provisioner:
                 worker_id=worker_id,
                 display_name=display_name,
                 slots=slots_total,
-                tunnel_remote_port=tunnel_remote_port,
+                controller_url=controller_url,
                 auth_token=self.auth_token,
             )
         )

@@ -58,3 +58,34 @@ def test_register_worker_marks_provision_ready(store):
     )
     assert worker["provision_status"] == "ready"
     assert worker["status"] == "online"
+
+
+def test_create_provisioning_worker_direct_mode(store):
+    worker = store.create_provisioning_worker(
+        worker_id="ecs-worker-direct",
+        display_name="ecs-worker-direct",
+        slots_total=1,
+        ssh_host_alias="aeo-ecs-0004",
+        ssh_bootstrap_host_alias=None,
+        connection_mode="direct",
+        controller_internal_ip="192.168.0.211",
+        tunnel_remote_port=None,
+    )
+    assert worker["connection_mode"] == "direct"
+    assert worker["controller_internal_ip"] == "192.168.0.211"
+    assert worker["tunnel_remote_port"] is None
+
+
+def test_create_provisioning_worker_tunnel_mode(store):
+    worker = store.create_provisioning_worker(
+        worker_id="ecs-worker-tunnel",
+        display_name="ecs-worker-tunnel",
+        slots_total=1,
+        ssh_host_alias="aeo-ecs-0004",
+        ssh_bootstrap_host_alias=None,
+        connection_mode="tunnel",
+        controller_internal_ip=None,
+        tunnel_remote_port=17380,
+    )
+    assert worker["connection_mode"] == "tunnel"
+    assert worker["tunnel_remote_port"] == 17380

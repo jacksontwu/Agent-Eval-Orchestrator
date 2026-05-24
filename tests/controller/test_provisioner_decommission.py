@@ -56,7 +56,11 @@ def test_cancel_job_uses_decommission_worker(store, sample_ssh_config):
     )
     with patch.object(provisioner, "decommission_worker", return_value={"remoteCleanup": "done", "warnings": []}) as decommission:
         provisioner.cancel_job(job_id, worker_id="w1", ssh_host_alias="aeo-ecs-0004")
-    decommission.assert_called_once_with(worker_id="w1", ssh_host_alias="aeo-ecs-0004")
+    decommission.assert_called_once_with(
+        worker_id="w1",
+        ssh_host_alias="aeo-ecs-0004",
+        connection_mode="tunnel",
+    )
     job = store.get_provision_job(job_id)
     assert job is not None
     assert job["status"] == "cancelled"

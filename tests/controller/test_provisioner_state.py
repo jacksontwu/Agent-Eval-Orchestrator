@@ -6,7 +6,7 @@ from agent_eval_orchestrator.controller.provisioner import (
 
 
 def test_initial_steps_fresh():
-    steps = initial_steps_for_mode("fresh")
+    steps = initial_steps_for_mode("fresh", connection_mode="tunnel")
     assert [step["id"] for step in steps] == [
         "validate_ssh",
         "bootstrap",
@@ -19,7 +19,7 @@ def test_initial_steps_fresh():
 
 
 def test_initial_steps_join():
-    steps = initial_steps_for_mode("join")
+    steps = initial_steps_for_mode("join", connection_mode="tunnel")
     assert [step["id"] for step in steps] == [
         "validate_ssh",
         "verify_layout",

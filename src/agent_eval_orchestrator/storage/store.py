@@ -146,6 +146,24 @@ class Store:
                 if column not in worker_columns:
                     conn.execute(f"ALTER TABLE workers ADD COLUMN {column} {ddl}")
 
+            if "connection_mode" not in worker_columns:
+                conn.execute(
+                    "ALTER TABLE workers ADD COLUMN connection_mode TEXT NOT NULL DEFAULT 'direct'"
+                )
+                conn.execute(
+                    "ALTER TABLE workers ADD COLUMN controller_internal_ip TEXT"
+                )
+                conn.execute(
+                    """
+                    UPDATE workers
+                    SET connection_mode = 'tunnel'
+                    WHERE tunnel_remote_port IS NOT NULL
+                      AND ssh_host_alias != ''
+                      AND connection_mode = 'direct'
+                    """
+                )
+                self._make_tunnel_remote_port_nullable(conn)
+
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS provision_jobs (
@@ -163,6 +181,64 @@ class Store:
                 """
             )
             self._drop_case_details_column_if_present(conn)
+
+    def _make_tunnel_remote_port_nullable(self, conn: sqlite3.Connection) -> None:
+        tunnel_info = next(
+            (
+                row
+                for row in conn.execute("PRAGMA table_info(workers)").fetchall()
+                if str(row[1]) == "tunnel_remote_port"
+            ),
+            None,
+        )
+        if tunnel_info is None or not tunnel_info[3]:
+            return
+        conn.executescript(
+            """
+            CREATE TABLE workers_new (
+                worker_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                slots_total INTEGER NOT NULL,
+                slots_used INTEGER NOT NULL,
+                capabilities_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                note TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                allocation_weight REAL NOT NULL DEFAULT 1.0,
+                last_heartbeat_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                ssh_host_alias TEXT NOT NULL DEFAULT '',
+                ssh_bootstrap_host_alias TEXT,
+                tunnel_remote_port INTEGER,
+                provision_status TEXT NOT NULL DEFAULT 'none',
+                last_provision_error TEXT,
+                connection_mode TEXT NOT NULL DEFAULT 'direct',
+                controller_internal_ip TEXT
+            );
+            INSERT INTO workers_new(
+                worker_id, display_name, host, slots_total, slots_used,
+                capabilities_json, status, enabled, note, tags_json,
+                allocation_weight, last_heartbeat_at, created_at, updated_at,
+                ssh_host_alias, ssh_bootstrap_host_alias, tunnel_remote_port,
+                provision_status, last_provision_error, connection_mode,
+                controller_internal_ip
+            )
+            SELECT
+                worker_id, display_name, host, slots_total, slots_used,
+                capabilities_json, status, enabled, note, tags_json,
+                allocation_weight, last_heartbeat_at, created_at, updated_at,
+                ssh_host_alias, ssh_bootstrap_host_alias,
+                CASE WHEN connection_mode = 'direct' THEN NULL ELSE tunnel_remote_port END,
+                provision_status, last_provision_error, connection_mode,
+                controller_internal_ip
+            FROM workers;
+            DROP TABLE workers;
+            ALTER TABLE workers_new RENAME TO workers;
+            """
+        )
 
     def _drop_case_details_column_if_present(self, conn: sqlite3.Connection) -> None:
         case_columns = [
@@ -542,7 +618,9 @@ class Store:
         slots_total: int,
         ssh_host_alias: str,
         ssh_bootstrap_host_alias: str | None,
-        tunnel_remote_port: int,
+        connection_mode: str = "direct",
+        controller_internal_ip: str | None = None,
+        tunnel_remote_port: int | None = None,
     ) -> dict[str, Any]:
         now = now_iso()
         with self.connect() as conn:
@@ -552,10 +630,12 @@ class Store:
                     worker_id, display_name, host, slots_total, slots_used,
                     capabilities_json, status, enabled, note, tags_json,
                     ssh_host_alias, ssh_bootstrap_host_alias, tunnel_remote_port,
-                    provision_status, last_provision_error,
+                    provision_status, last_provision_error, connection_mode,
+                    controller_internal_ip,
                     last_heartbeat_at, created_at, updated_at
                 ) VALUES(?, ?, '', ?, 0, '{}', 'unavailable', 1, '', '[]',
-                         ?, ?, ?, 'provisioning', NULL, NULL, ?, ?)
+                         ?, ?, ?, 'provisioning', NULL, ?, ?,
+                         NULL, ?, ?)
                 """,
                 (
                     worker_id,
@@ -564,6 +644,8 @@ class Store:
                     ssh_host_alias,
                     ssh_bootstrap_host_alias,
                     tunnel_remote_port,
+                    connection_mode,
+                    controller_internal_ip,
                     now,
                     now,
                 ),
@@ -573,6 +655,16 @@ class Store:
                 (worker_id,),
             ).fetchone()
         return self._decorate_worker(self._worker_item(row))
+
+    def update_worker_host(self, worker_id: str, host: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE workers SET host = ?, updated_at = ?
+                WHERE worker_id = ?
+                """,
+                (host, now_iso(), worker_id),
+            )
 
     def set_worker_provision_status(
         self,

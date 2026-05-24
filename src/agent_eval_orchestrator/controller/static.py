@@ -1387,8 +1387,20 @@ INDEX_HTML = """<!doctype html>
             '<div class="field"><label>Worker ID *</label><input name="workerId" placeholder="ecs-worker-0004" required /></div>' +
             '<div class="field"><label>显示名称</label><input name="displayName" placeholder="默认同 Worker ID" /></div>' +
             '<div class="field"><label>Slots *</label><input name="slotsTotal" type="number" min="1" value="1" required /></div>' +
-            '<div class="field"><label>Tunnel Remote Port</label><input name="tunnelRemotePort" type="number" min="1024" value="17380" /></div>' +
+            '<div class="field"><label>Controller 内网 IP *</label>' +
+              '<input name="controllerInternalIp" placeholder="192.168.0.211" required />' +
+              '<div class="subtle">在 Controller 上运行 ifconfig 或 ip addr 查看内网地址</div></div>' +
           '</div>' +
+          '<details class="field" style="margin-bottom:16px">' +
+            '<summary>高级选项</summary>' +
+            '<label style="display:block;margin-top:12px">' +
+              '<input type="checkbox" name="useTunnel" id="useTunnelCheckbox" /> 使用 SSH 反向隧道（旧方案，不推荐）' +
+            '</label>' +
+            '<div class="field hidden" id="tunnelPortField" style="margin-top:12px">' +
+              '<label>Tunnel Remote Port</label>' +
+              '<input name="tunnelRemotePort" type="number" min="1024" value="17380" />' +
+            '</div>' +
+          '</details>' +
           '<div class="field" style="margin-bottom:16px">' +
             '<label>部署模式 *</label>' +
             '<div class="actions">' +
@@ -1471,6 +1483,17 @@ INDEX_HTML = """<!doctype html>
           input.addEventListener("change", syncMode);
         });
         syncMode();
+        const useTunnel = form.querySelector("#useTunnelCheckbox");
+        const tunnelField = form.querySelector("#tunnelPortField");
+        const controllerIpField = form.querySelector('[name="controllerInternalIp"]');
+        function syncConnectionMode() {
+          const tunnel = useTunnel.checked;
+          tunnelField.classList.toggle("hidden", !tunnel);
+          controllerIpField.required = !tunnel;
+          controllerIpField.closest(".field").classList.toggle("hidden", tunnel);
+        }
+        useTunnel.addEventListener("change", syncConnectionMode);
+        syncConnectionMode();
         document.getElementById("addWorkerCancelForm").addEventListener("click", closeAddWorkerModal);
         form.addEventListener("submit", submitAddWorkerForm);
         return;
@@ -1483,14 +1506,20 @@ INDEX_HTML = """<!doctype html>
       event.preventDefault();
       const form = new FormData(event.target);
       const mode = String(form.get("deployMode") || "fresh");
+      const useTunnel = Boolean(form.get("useTunnel"));
       const payload = {
         workerId: String(form.get("workerId") || "").trim(),
         displayName: String(form.get("displayName") || "").trim() || String(form.get("workerId") || "").trim(),
         slotsTotal: Number(form.get("slotsTotal") || 1),
         mode,
         sshHostAlias: String(form.get("sshHostAlias") || "").trim(),
-        tunnelRemotePort: Number(form.get("tunnelRemotePort") || 17380),
+        connectionMode: useTunnel ? "tunnel" : "direct",
       };
+      if (useTunnel) {
+        payload.tunnelRemotePort = Number(form.get("tunnelRemotePort") || 17380);
+      } else {
+        payload.controllerInternalIp = String(form.get("controllerInternalIp") || "").trim();
+      }
       if (mode === "fresh") {
         payload.sshBootstrapHostAlias = String(form.get("sshBootstrapHostAlias") || "").trim();
         payload.djnPassword = String(form.get("djnPassword") || "");

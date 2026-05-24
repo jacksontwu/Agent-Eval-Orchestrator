@@ -381,6 +381,16 @@ def _build_executor_config(
     }
 
 
+def _validate_controller_internal_ip(value: str) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return bool(value and " " not in value and len(value) <= 253)
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: object, code: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(code)
@@ -946,6 +956,29 @@ class Handler(BaseHTTPRequestHandler):
             if self.store.worker_exists(worker_id):
                 _json_response(self, {"error": "worker already exists"}, 409)
                 return
+            connection_mode = str(body.get("connectionMode") or "direct").strip()
+            if connection_mode not in {"direct", "tunnel"}:
+                _json_response(self, {"error": "connectionMode must be direct or tunnel"}, 400)
+                return
+            controller_internal_ip = str(body.get("controllerInternalIp") or "").strip() or None
+            tunnel_remote_port = (
+                int(body.get("tunnelRemotePort") or 17380)
+                if body.get("tunnelRemotePort") is not None
+                else 17380
+            )
+            if connection_mode == "direct":
+                if not controller_internal_ip:
+                    _json_response(self, {"error": "direct mode requires controllerInternalIp"}, 400)
+                    return
+                if not _validate_controller_internal_ip(controller_internal_ip):
+                    _json_response(self, {"error": "invalid controllerInternalIp"}, 400)
+                    return
+                tunnel_remote_port = None
+            else:
+                controller_internal_ip = None
+                if tunnel_remote_port < 1024 or tunnel_remote_port > 65535:
+                    _json_response(self, {"error": "tunnelRemotePort out of range"}, 400)
+                    return
             config_path = (self.ssh_config_path or Path("~/.ssh/config")).expanduser()
             ok, message = test_ssh_alias(config_path, ssh_host_alias)
             if not ok:
@@ -967,7 +1000,6 @@ class Handler(BaseHTTPRequestHandler):
                     return
             display_name = str(body.get("displayName") or worker_id)
             slots_total = int(body.get("slotsTotal") or 1)
-            tunnel_remote_port = int(body.get("tunnelRemotePort") or 17380)
             from agent_eval_orchestrator.core.ids import new_id
 
             job_id = new_id("prov")
@@ -977,13 +1009,15 @@ class Handler(BaseHTTPRequestHandler):
                 slots_total=slots_total,
                 ssh_host_alias=ssh_host_alias,
                 ssh_bootstrap_host_alias=bootstrap_alias,
+                connection_mode=connection_mode,
+                controller_internal_ip=controller_internal_ip,
                 tunnel_remote_port=tunnel_remote_port,
             )
             self.store.create_provision_job(
                 job_id=job_id,
                 worker_id=worker_id,
                 mode=mode,
-                steps=self.provisioner.initial_steps(mode),
+                steps=self.provisioner.initial_steps(mode, connection_mode=connection_mode),
             )
             self.provisioner.start_job_async(
                 job_id=job_id,
@@ -992,6 +1026,8 @@ class Handler(BaseHTTPRequestHandler):
                 ssh_host_alias=ssh_host_alias,
                 ssh_bootstrap_host_alias=bootstrap_alias,
                 djn_password=djn_password or None,
+                connection_mode=connection_mode,
+                controller_internal_ip=controller_internal_ip,
                 tunnel_remote_port=tunnel_remote_port,
                 display_name=display_name,
                 slots_total=slots_total,
@@ -1012,8 +1048,12 @@ class Handler(BaseHTTPRequestHandler):
                 None,
             )
             ssh_alias = str(worker.get("ssh_host_alias") or "") if worker else ""
+            connection_mode = str(worker.get("connection_mode") or "tunnel") if worker else "tunnel"
             self.provisioner.cancel_job(
-                job_id, worker_id=str(job["worker_id"]), ssh_host_alias=ssh_alias
+                job_id,
+                worker_id=str(job["worker_id"]),
+                ssh_host_alias=ssh_alias,
+                connection_mode=connection_mode,
             )
             self.store.set_worker_provision_status(
                 str(job["worker_id"]),
@@ -1135,14 +1175,17 @@ class Handler(BaseHTTPRequestHandler):
                 latest = self.store.get_latest_provision_job_for_worker(worker_id)
                 if latest and str(latest["status"]) in {"pending", "running"}:
                     ssh_alias = str(worker.get("ssh_host_alias") or "")
+                    connection_mode = str(worker.get("connection_mode") or "tunnel")
                     self.provisioner.cancel_job(
                         str(latest["job_id"]),
                         worker_id=worker_id,
                         ssh_host_alias=ssh_alias,
+                        connection_mode=connection_mode,
                     )
                 cleanup = self.provisioner.decommission_worker(
                     worker_id=worker_id,
                     ssh_host_alias=str(worker.get("ssh_host_alias") or "") or None,
+                    connection_mode=str(worker.get("connection_mode") or "tunnel"),
                 )
             else:
                 cleanup = {"remoteCleanup": "skipped", "warnings": []}

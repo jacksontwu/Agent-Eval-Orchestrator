@@ -2,6 +2,7 @@ import json
 from http.client import HTTPConnection
 from pathlib import Path
 from threading import Thread
+from unittest.mock import patch
 
 from agent_eval_orchestrator.controller.server import Handler, ThreadedServer
 from agent_eval_orchestrator.controller.provisioner import Provisioner
@@ -48,6 +49,7 @@ def test_provision_duplicate_worker_returns_409(store, sample_ssh_config):
             "slotsTotal": 1,
             "mode": "join",
             "sshHostAlias": "aeo-ecs-0004",
+            "connectionMode": "tunnel",
             "tunnelRemotePort": 17380,
         }
     )
@@ -60,3 +62,44 @@ def test_provision_duplicate_worker_returns_409(store, sample_ssh_config):
     resp = conn.getresponse()
     assert resp.status == 409
     server.shutdown()
+
+
+def test_provision_direct_requires_controller_ip(store, sample_ssh_config):
+    server = start_test_server(store, sample_ssh_config, 9876)
+    conn = HTTPConnection("127.0.0.1", 9876)
+    body = json.dumps(
+        {
+            "workerId": "ecs-worker-direct-api",
+            "mode": "join",
+            "sshHostAlias": "aeo-ecs-0004",
+            "connectionMode": "direct",
+        }
+    )
+    conn.request("POST", "/api/workers/provision", body=body, headers={"Content-Type": "application/json", "X-AEO-Token": "secret"})
+    resp = conn.getresponse()
+    assert resp.status == 400
+    payload = json.loads(resp.read())
+    assert "controllerInternalIp" in payload["error"]
+    server.shutdown()
+
+
+def test_provision_direct_accepts_valid_ip(store, sample_ssh_config):
+    with patch(
+        "agent_eval_orchestrator.controller.server.test_ssh_alias",
+        return_value=(True, "connected"),
+    ):
+        server = start_test_server(store, sample_ssh_config, 9875)
+        conn = HTTPConnection("127.0.0.1", 9875)
+        body = json.dumps(
+            {
+                "workerId": "ecs-worker-direct-api2",
+                "mode": "join",
+                "sshHostAlias": "aeo-ecs-0004",
+                "connectionMode": "direct",
+                "controllerInternalIp": "192.168.0.211",
+            }
+        )
+        conn.request("POST", "/api/workers/provision", body=body, headers={"Content-Type": "application/json", "X-AEO-Token": "secret"})
+        resp = conn.getresponse()
+        assert resp.status == 201
+        server.shutdown()

@@ -58,7 +58,7 @@ def test_fresh_mode_step_order(provisioner, store, monkeypatch):
         job_id=job_id,
         worker_id=worker_id,
         mode="fresh",
-        steps=provisioner.initial_steps("fresh"),
+        steps=provisioner.initial_steps("fresh", connection_mode="tunnel"),
     )
 
     provisioner.run_job(
@@ -68,6 +68,7 @@ def test_fresh_mode_step_order(provisioner, store, monkeypatch):
         ssh_host_alias="aeo-ecs-0004",
         ssh_bootstrap_host_alias="aeo-ecs-0004-root",
         djn_password="pw",
+        connection_mode="tunnel",
         tunnel_remote_port=17380,
         display_name=worker_id,
         slots_total=1,
@@ -114,7 +115,7 @@ def test_join_mode_skips_bootstrap(provisioner, store, monkeypatch):
         job_id=job_id,
         worker_id=worker_id,
         mode="join",
-        steps=provisioner.initial_steps("join"),
+        steps=provisioner.initial_steps("join", connection_mode="tunnel"),
     )
 
     provisioner.run_job(
@@ -124,6 +125,7 @@ def test_join_mode_skips_bootstrap(provisioner, store, monkeypatch):
         ssh_host_alias="aeo-ecs-0004",
         ssh_bootstrap_host_alias=None,
         djn_password=None,
+        connection_mode="tunnel",
         tunnel_remote_port=17380,
         display_name=worker_id,
         slots_total=1,

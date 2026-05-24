@@ -10,12 +10,35 @@ def test_build_daemon_start_command():
         worker_id="ecs-worker-0004",
         display_name="ecs-worker-0004",
         slots=2,
-        tunnel_remote_port=17380,
+        controller_url="http://127.0.0.1:17380",
         auth_token="secret-token-value",
     )
     assert '--worker-id "ecs-worker-0004"' in cmd
     assert '--controller-url "http://127.0.0.1:17380"' in cmd
     assert "secret-token-value" in cmd
+
+
+def test_build_daemon_start_command_direct_url():
+    cmd = build_daemon_start_command(
+        worker_id="ecs-worker-0004",
+        display_name="ecs-worker-0004",
+        slots=2,
+        controller_url="http://192.168.0.211:7380",
+        auth_token="secret-token-value",
+    )
+    assert '--controller-url "http://192.168.0.211:7380"' in cmd
+    assert "127.0.0.1" not in cmd
+
+
+def test_build_daemon_start_command_tunnel_loopback():
+    cmd = build_daemon_start_command(
+        worker_id="ecs-worker-0004",
+        display_name="ecs-worker-0004",
+        slots=2,
+        controller_url="http://127.0.0.1:17380",
+        auth_token="secret-token-value",
+    )
+    assert '--controller-url "http://127.0.0.1:17380"' in cmd
 
 
 def test_build_bootstrap_command():
