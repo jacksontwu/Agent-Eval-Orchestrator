@@ -135,6 +135,33 @@ class Store:
                 conn.execute(
                     "ALTER TABLE workers ADD COLUMN allocation_weight REAL NOT NULL DEFAULT 1.0"
                 )
+            provision_columns = {
+                "ssh_host_alias": "TEXT NOT NULL DEFAULT ''",
+                "ssh_bootstrap_host_alias": "TEXT",
+                "tunnel_remote_port": "INTEGER NOT NULL DEFAULT 17380",
+                "provision_status": "TEXT NOT NULL DEFAULT 'none'",
+                "last_provision_error": "TEXT",
+            }
+            for column, ddl in provision_columns.items():
+                if column not in worker_columns:
+                    conn.execute(f"ALTER TABLE workers ADD COLUMN {column} {ddl}")
+
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS provision_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    worker_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_step TEXT,
+                    steps_json TEXT NOT NULL,
+                    log_text TEXT NOT NULL DEFAULT '',
+                    error_text TEXT,
+                    created_at TEXT NOT NULL,
+                    finished_at TEXT
+                );
+                """
+            )
             self._drop_case_details_column_if_present(conn)
 
     def _drop_case_details_column_if_present(self, conn: sqlite3.Connection) -> None:
@@ -438,11 +465,15 @@ class Store:
             if existing:
                 merged_capabilities = json.loads(existing["capabilities_json"] or "{}")
                 merged_capabilities.update(capabilities)
+                provision_status = str(existing["provision_status"] or "none")
+                if provision_status == "provisioning":
+                    provision_status = "ready"
                 conn.execute(
                     """
                     UPDATE workers
                     SET display_name = ?, host = ?, slots_total = ?, slots_used = ?,
-                        capabilities_json = ?, status = ?, last_heartbeat_at = ?, updated_at = ?
+                        capabilities_json = ?, status = ?, provision_status = ?,
+                        last_heartbeat_at = ?, updated_at = ?
                     WHERE worker_id = ?
                     """,
                     (
@@ -452,6 +483,7 @@ class Store:
                         slots_used,
                         json.dumps(merged_capabilities, ensure_ascii=False),
                         status,
+                        provision_status,
                         now,
                         now,
                         worker_id,
@@ -480,7 +512,185 @@ class Store:
                     ),
                 )
             row = conn.execute("SELECT * FROM workers WHERE worker_id = ?", (worker_id,)).fetchone()
-        return self._worker_item(row)
+        return self._decorate_worker(self._worker_item(row))
+
+    def worker_exists(self, worker_id: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM workers WHERE worker_id = ?",
+                (worker_id,),
+            ).fetchone()
+        return row is not None
+
+    def create_provisioning_worker(
+        self,
+        *,
+        worker_id: str,
+        display_name: str,
+        slots_total: int,
+        ssh_host_alias: str,
+        ssh_bootstrap_host_alias: str | None,
+        tunnel_remote_port: int,
+    ) -> dict[str, Any]:
+        now = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO workers(
+                    worker_id, display_name, host, slots_total, slots_used,
+                    capabilities_json, status, enabled, note, tags_json,
+                    ssh_host_alias, ssh_bootstrap_host_alias, tunnel_remote_port,
+                    provision_status, last_provision_error,
+                    last_heartbeat_at, created_at, updated_at
+                ) VALUES(?, ?, '', ?, 0, '{}', 'unavailable', 1, '', '[]',
+                         ?, ?, ?, 'provisioning', NULL, NULL, ?, ?)
+                """,
+                (
+                    worker_id,
+                    display_name,
+                    slots_total,
+                    ssh_host_alias,
+                    ssh_bootstrap_host_alias,
+                    tunnel_remote_port,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM workers WHERE worker_id = ?",
+                (worker_id,),
+            ).fetchone()
+        return self._decorate_worker(self._worker_item(row))
+
+    def set_worker_provision_status(
+        self,
+        worker_id: str,
+        *,
+        provision_status: str,
+        last_provision_error: str | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE workers
+                SET provision_status = ?, last_provision_error = ?, updated_at = ?
+                WHERE worker_id = ?
+                """,
+                (provision_status, last_provision_error, now_iso(), worker_id),
+            )
+
+    def create_provision_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        mode: str,
+        steps: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO provision_jobs(
+                    job_id, worker_id, mode, status, current_step,
+                    steps_json, log_text, error_text, created_at, finished_at
+                ) VALUES(?, ?, ?, 'pending', NULL, ?, '', NULL, ?, NULL)
+                """,
+                (
+                    job_id,
+                    worker_id,
+                    mode,
+                    json.dumps(steps, ensure_ascii=False),
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM provision_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._provision_job_item(row)
+
+    def get_provision_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM provision_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._provision_job_item(row) if row else None
+
+    def get_latest_provision_job_for_worker(self, worker_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM provision_jobs
+                WHERE worker_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (worker_id,),
+            ).fetchone()
+        return self._provision_job_item(row) if row else None
+
+    def append_provision_log(self, job_id: str, chunk: str) -> None:
+        if not chunk:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE provision_jobs
+                SET log_text = log_text || ?
+                WHERE job_id = ?
+                """,
+                (chunk, job_id),
+            )
+
+    def update_provision_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        current_step: str | None = None,
+        steps: list[dict[str, Any]] | None = None,
+        error_text: str | None = None,
+        finished: bool = False,
+    ) -> dict[str, Any] | None:
+        now = now_iso()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM provision_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            next_status = status or str(row["status"])
+            next_step = current_step if current_step is not None else row["current_step"]
+            next_steps_json = (
+                json.dumps(steps, ensure_ascii=False)
+                if steps is not None
+                else str(row["steps_json"])
+            )
+            next_error = error_text if error_text is not None else row["error_text"]
+            finished_at = now if finished else row["finished_at"]
+            conn.execute(
+                """
+                UPDATE provision_jobs
+                SET status = ?, current_step = ?, steps_json = ?,
+                    error_text = ?, finished_at = ?
+                WHERE job_id = ?
+                """,
+                (next_status, next_step, next_steps_json, next_error, finished_at, job_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM provision_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._provision_job_item(updated)
+
+    def _provision_job_item(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["steps"] = json.loads(item.pop("steps_json"))
+        item["log_tail"] = item["log_text"][-8192:] if item.get("log_text") else ""
+        return item
 
     def list_workers(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1008,6 +1218,23 @@ class Store:
         *,
         heartbeat_timeout_sec: int = DEFAULT_HEARTBEAT_TIMEOUT_SEC,
     ) -> dict[str, Any]:
+        provision_status = str(item.get("provision_status") or "none")
+        if provision_status == "provisioning":
+            item["status"] = "provisioning"
+            item["manualStatus"] = "enabled" if item.get("enabled", True) else "disabled"
+            item["allocationScore"] = round(self._worker_allocation_score(item), 2)
+            latest = self.get_latest_provision_job_for_worker(str(item["worker_id"]))
+            if latest:
+                item["last_provision_job_id"] = latest["job_id"]
+            return item
+        if provision_status == "failed":
+            item["status"] = "provision_failed"
+            item["manualStatus"] = "enabled" if item.get("enabled", True) else "disabled"
+            item["allocationScore"] = round(self._worker_allocation_score(item), 2)
+            latest = self.get_latest_provision_job_for_worker(str(item["worker_id"]))
+            if latest:
+                item["last_provision_job_id"] = latest["job_id"]
+            return item
         status = str(item.get("status") or "online")
         last = item.get("last_heartbeat_at")
         if status != "removed":
@@ -1022,4 +1249,7 @@ class Store:
         item["status"] = status
         item["manualStatus"] = "enabled" if item.get("enabled", True) else "disabled"
         item["allocationScore"] = round(self._worker_allocation_score(item), 2)
+        latest = self.get_latest_provision_job_for_worker(str(item["worker_id"]))
+        if latest:
+            item["last_provision_job_id"] = latest["job_id"]
         return item

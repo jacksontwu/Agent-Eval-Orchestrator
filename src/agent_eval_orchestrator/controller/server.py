@@ -31,6 +31,8 @@ from agent_eval_orchestrator.core.defaults import (
 )
 from agent_eval_orchestrator.core.ids import now_iso, sanitize_name
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
+from agent_eval_orchestrator.controller.provisioner import Provisioner
+from agent_eval_orchestrator.controller.ssh_config import list_ssh_hosts, test_ssh_alias
 from agent_eval_orchestrator.controller.static import INDEX_HTML
 from agent_eval_orchestrator.storage.layout import default_layout
 from agent_eval_orchestrator.storage.store import Store
@@ -427,6 +429,8 @@ class Handler(BaseHTTPRequestHandler):
     auth_token: str | None = None
     viewer_manager: HarborViewerManager | None = None
     global_viewer_process: subprocess.Popen | None = None
+    provisioner: Provisioner | None = None
+    ssh_config_path: Path | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[controller] {self.address_string()} {fmt % args}", flush=True)
@@ -645,6 +649,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/workers":
             _json_response(self, self.store.list_workers())
+            return
+        if path == "/api/ssh/hosts":
+            config_path = (self.ssh_config_path or Path("~/.ssh/config")).expanduser()
+            _json_response(
+                self,
+                {
+                    "sshConfigPath": str(config_path),
+                    "items": list_ssh_hosts(config_path),
+                },
+            )
+            return
+        if path.startswith("/api/workers/provision/"):
+            job_id = path.split("/")[4]
+            job = self.store.get_provision_job(job_id)
+            if not job:
+                _json_response(self, {"error": "job not found"}, 404)
+                return
+            _json_response(
+                self,
+                {
+                    "jobId": job["job_id"],
+                    "workerId": job["worker_id"],
+                    "mode": job["mode"],
+                    "status": job["status"],
+                    "currentStep": job["current_step"],
+                    "steps": job["steps"],
+                    "logTail": job["log_tail"],
+                    "errorText": job["error_text"],
+                    "createdAt": job["created_at"],
+                    "finishedAt": job["finished_at"],
+                },
+            )
             return
         if path == "/api/workers/runtime":
             _json_response(self, self.store.list_worker_runtime_status())
@@ -888,6 +924,104 @@ class Handler(BaseHTTPRequestHandler):
             )
             _json_response(self, worker)
             return
+        if path == "/api/ssh/test":
+            host_alias = str(body.get("hostAlias") or "").strip()
+            if not host_alias:
+                _json_response(self, {"error": "hostAlias is required"}, 400)
+                return
+            config_path = (self.ssh_config_path or Path("~/.ssh/config")).expanduser()
+            ok, message = test_ssh_alias(config_path, host_alias)
+            _json_response(self, {"ok": ok, "message": message})
+            return
+        if path == "/api/workers/provision":
+            if self.provisioner is None:
+                _json_response(self, {"error": "provisioner unavailable"}, 500)
+                return
+            worker_id = str(body.get("workerId") or "").strip()
+            mode = str(body.get("mode") or "").strip()
+            ssh_host_alias = str(body.get("sshHostAlias") or "").strip()
+            if not worker_id or mode not in {"fresh", "join"} or not ssh_host_alias:
+                _json_response(self, {"error": "workerId, mode, sshHostAlias are required"}, 400)
+                return
+            if self.store.worker_exists(worker_id):
+                _json_response(self, {"error": "worker already exists"}, 409)
+                return
+            config_path = (self.ssh_config_path or Path("~/.ssh/config")).expanduser()
+            ok, message = test_ssh_alias(config_path, ssh_host_alias)
+            if not ok:
+                _json_response(self, {"error": message}, 400)
+                return
+            bootstrap_alias = str(body.get("sshBootstrapHostAlias") or "").strip() or None
+            djn_password = str(body.get("djnPassword") or "")
+            if mode == "fresh":
+                if not bootstrap_alias or not djn_password:
+                    _json_response(
+                        self,
+                        {"error": "fresh mode requires sshBootstrapHostAlias and djnPassword"},
+                        400,
+                    )
+                    return
+                ok_root, root_message = test_ssh_alias(config_path, bootstrap_alias)
+                if not ok_root:
+                    _json_response(self, {"error": root_message}, 400)
+                    return
+            display_name = str(body.get("displayName") or worker_id)
+            slots_total = int(body.get("slotsTotal") or 1)
+            tunnel_remote_port = int(body.get("tunnelRemotePort") or 17380)
+            from agent_eval_orchestrator.core.ids import new_id
+
+            job_id = new_id("prov")
+            self.store.create_provisioning_worker(
+                worker_id=worker_id,
+                display_name=display_name,
+                slots_total=slots_total,
+                ssh_host_alias=ssh_host_alias,
+                ssh_bootstrap_host_alias=bootstrap_alias,
+                tunnel_remote_port=tunnel_remote_port,
+            )
+            self.store.create_provision_job(
+                job_id=job_id,
+                worker_id=worker_id,
+                mode=mode,
+                steps=self.provisioner.initial_steps(mode),
+            )
+            self.provisioner.start_job_async(
+                job_id=job_id,
+                worker_id=worker_id,
+                mode=mode,
+                ssh_host_alias=ssh_host_alias,
+                ssh_bootstrap_host_alias=bootstrap_alias,
+                djn_password=djn_password or None,
+                tunnel_remote_port=tunnel_remote_port,
+                display_name=display_name,
+                slots_total=slots_total,
+            )
+            _json_response(self, {"jobId": job_id, "workerId": worker_id, "status": "pending"}, 201)
+            return
+        if path.startswith("/api/workers/provision/") and path.endswith("/cancel"):
+            job_id = path.split("/")[4]
+            job = self.store.get_provision_job(job_id)
+            if not job:
+                _json_response(self, {"error": "job not found"}, 404)
+                return
+            if self.provisioner is None:
+                _json_response(self, {"error": "provisioner unavailable"}, 500)
+                return
+            worker = next(
+                (item for item in self.store.list_workers() if item["worker_id"] == job["worker_id"]),
+                None,
+            )
+            ssh_alias = str(worker.get("ssh_host_alias") or "") if worker else ""
+            self.provisioner.cancel_job(
+                job_id, worker_id=str(job["worker_id"]), ssh_host_alias=ssh_alias
+            )
+            self.store.set_worker_provision_status(
+                str(job["worker_id"]),
+                provision_status="failed",
+                last_provision_error="cancelled by operator",
+            )
+            _json_response(self, {"ok": True, "jobId": job_id, "status": "cancelled"})
+            return
         if path.startswith("/api/workers/") and path.endswith("/settings"):
             worker_id = path.split("/")[3]
             worker = self.store.update_worker_settings(
@@ -977,13 +1111,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--shared-root", default=None)
     parser.add_argument("--auth-token", default=None)
+    parser.add_argument("--ssh-config", default="~/.ssh/config")
     args = parser.parse_args(argv)
 
     layout = default_layout(args.shared_root)
     store = Store(layout)
+    repo_root = Path(__file__).resolve().parents[3]
+    bootstrap_script = repo_root / "scripts" / "bootstrap-huawei-worker.sh"
+    ssh_config_path = Path(args.ssh_config).expanduser()
+    provisioner = Provisioner(
+        store=store,
+        ssh_config_path=ssh_config_path,
+        auth_token=str(args.auth_token or "") or None,
+        controller_port=args.port,
+        bootstrap_script_path=bootstrap_script,
+        tunnel_state_path=layout.controller_dir / "tunnels.json",
+    )
     server = ThreadedServer((args.host, args.port), Handler)
     Handler.store = store
     Handler.auth_token = str(args.auth_token or "") or None
+    Handler.provisioner = provisioner
+    Handler.ssh_config_path = ssh_config_path
     Handler.viewer_manager = HarborViewerManager(
         harbor_repo=Path("/root/projects/harbor").resolve(),
         logs_dir=layout.controller_dir / "viewer-logs",

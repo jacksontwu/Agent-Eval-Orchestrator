@@ -385,8 +385,14 @@ INDEX_HTML = """<!doctype html>
       background: #f8fbfd;
     }
     .modal-body {
-      padding: 0;
+      padding: 20px 24px 24px;
       overflow: auto;
+    }
+    .modal-body .detail-grid {
+      gap: 16px;
+    }
+    .modal-body .actions {
+      margin-top: 4px;
     }
     .modal-close {
       border: 1px solid var(--border);
@@ -474,8 +480,9 @@ INDEX_HTML = """<!doctype html>
     <section id="workersView" class="hidden">
       <div class="layout">
         <div class="panel">
-          <div class="panel-header">
+          <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
             <h2>Workers</h2>
+            <button class="primary" type="button" id="openAddWorkerBtn">添加 Worker</button>
           </div>
           <div id="workerRuntimeSummary"></div>
           <div class="panel-body list" id="workerList"></div>
@@ -588,6 +595,19 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
 
+  <div class="modal hidden" id="addWorkerModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3 id="addWorkerModalTitle">添加 Worker</h3>
+          <div class="subtle" id="addWorkerModalSubtitle">通过 SSH 远程部署 Worker 节点</div>
+        </div>
+        <button class="modal-close" id="addWorkerModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="addWorkerModalBody"></div>
+    </div>
+  </div>
+
   <script>
     const state = {
       tasks: [],
@@ -607,14 +627,17 @@ INDEX_HTML = """<!doctype html>
         status: "",
         worker: "",
       },
+      provisionJob: null,
+      sshHosts: [],
+      addWorkerPhase: "form",
     };
 
     function badge(value) {
       const lower = String(value || "").toLowerCase();
       let cls = "idle";
       if (["online", "finished", "succeeded", "completed", "enabled"].includes(lower)) cls = "ok";
-      else if (["running", "queued"].includes(lower)) cls = "warn";
-      else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed", "interrupted"].includes(lower)) cls = "bad";
+      else if (["running", "queued", "provisioning"].includes(lower)) cls = "warn";
+      else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed", "interrupted", "provision_failed"].includes(lower)) cls = "bad";
       else if (["missing-result"].includes(lower)) cls = "warn";
       return '<span class="badge ' + cls + '">' + value + "</span>";
     }
@@ -1115,8 +1138,11 @@ INDEX_HTML = """<!doctype html>
         const active = worker.worker_id === state.selectedWorkerId ? " active" : "";
         const runtime = runtimeForWorker(worker.worker_id) || {};
         const current = runtime.currentBatch;
+        let statusBadge = worker.status;
+        if (worker.provision_status === "provisioning") statusBadge = "provisioning";
+        if (worker.provision_status === "failed") statusBadge = "provision_failed";
         return '<button class="item' + active + '" data-worker-id="' + esc(worker.worker_id) + '">' +
-          '<div class="item-title"><strong>' + esc(worker.display_name) + '</strong>' + badge(worker.status) + '</div>' +
+          '<div class="item-title"><strong>' + esc(worker.display_name) + '</strong>' + badge(statusBadge) + '</div>' +
           '<div class="item-meta">' +
             '<span>host: <code>' + esc(worker.host) + '</code></span>' +
             '<span>manual: ' + badge(worker.manualStatus) + '</span>' +
@@ -1177,6 +1203,9 @@ INDEX_HTML = """<!doctype html>
             '<button class="ghost" type="button" id="toggleEnabledBtn">' + (worker.enabled ? "设为禁用" : "设为启用") + '</button>' +
           '</div>' +
         '</form>' +
+        (worker.provision_status === "failed" && worker.last_provision_job_id
+          ? '<div class="actions" style="margin-top:12px"><button class="link-btn" type="button" id="viewProvisionLogBtn">查看最近部署日志</button></div>'
+          : '') +
         '<div style="margin-top:16px"><h3 style="margin-bottom:8px">Capabilities</h3><pre>' + esc(JSON.stringify(worker.capabilities, null, 2)) + '</pre></div>';
 
       root.querySelector("#workerForm").addEventListener("submit", async (event) => {
@@ -1204,6 +1233,223 @@ INDEX_HTML = """<!doctype html>
         });
         await loadDashboard();
       });
+
+      const viewLogBtn = root.querySelector("#viewProvisionLogBtn");
+      if (viewLogBtn) {
+        viewLogBtn.addEventListener("click", () => {
+          state.provisionJob = { jobId: worker.last_provision_job_id };
+          state.addWorkerPhase = "progress";
+          openAddWorkerModal();
+        });
+      }
+    }
+
+    let provisionPollTimer = null;
+
+    function closeAddWorkerModal() {
+      state.provisionJob = null;
+      state.addWorkerPhase = "form";
+      if (provisionPollTimer) {
+        clearInterval(provisionPollTimer);
+        provisionPollTimer = null;
+      }
+      document.getElementById("addWorkerModal").classList.add("hidden");
+    }
+
+    function openAddWorkerModal() {
+      renderAddWorkerModal();
+      document.getElementById("addWorkerModal").classList.remove("hidden");
+      if (state.addWorkerPhase === "progress" && state.provisionJob?.jobId) {
+        startProvisionPolling();
+      }
+    }
+
+    async function loadSshHosts() {
+      try {
+        const payload = await api("/api/ssh/hosts");
+        state.sshHosts = payload.items || [];
+      } catch (error) {
+        state.sshHosts = [];
+      }
+    }
+
+    function sshHostOptions(selected) {
+      const options = (state.sshHosts || []).map(item =>
+        '<option value="' + esc(item.hostAlias) + '"' +
+        (item.hostAlias === selected ? ' selected' : '') + '>' +
+        esc(item.hostAlias + ' (' + item.user + '@' + item.hostname + ')') +
+        '</option>'
+      ).join("");
+      return '<option value="">选择或手动输入 Host alias</option>' + options;
+    }
+
+    function renderAddWorkerForm() {
+      return '' +
+        '<form id="addWorkerForm">' +
+          '<div class="detail-grid" style="margin-bottom:16px">' +
+            '<div class="field"><label>Worker ID *</label><input name="workerId" placeholder="ecs-worker-0004" required /></div>' +
+            '<div class="field"><label>显示名称</label><input name="displayName" placeholder="默认同 Worker ID" /></div>' +
+            '<div class="field"><label>Slots *</label><input name="slotsTotal" type="number" min="1" value="1" required /></div>' +
+            '<div class="field"><label>Tunnel Remote Port</label><input name="tunnelRemotePort" type="number" min="1024" value="17380" /></div>' +
+          '</div>' +
+          '<div class="field" style="margin-bottom:16px">' +
+            '<label>部署模式 *</label>' +
+            '<div class="actions">' +
+              '<label><input type="radio" name="deployMode" value="fresh" checked /> 全新安装</label>' +
+              '<label><input type="radio" name="deployMode" value="join" /> 仅接入</label>' +
+            '</div>' +
+          '</div>' +
+          '<div class="field" style="margin-bottom:16px">' +
+            '<label>SSH Host (djn) *</label>' +
+            '<input list="sshHostAliases" name="sshHostAlias" required />' +
+            '<datalist id="sshHostAliases">' +
+              (state.sshHosts || []).map(item => '<option value="' + esc(item.hostAlias) + '"></option>').join("") +
+            '</datalist>' +
+          '</div>' +
+          '<div id="freshOnlyFields">' +
+            '<div class="field" style="margin-bottom:16px">' +
+              '<label>SSH Host (root) *</label>' +
+              '<input list="sshBootstrapAliases" name="sshBootstrapHostAlias" placeholder="建议 -root 后缀" />' +
+              '<datalist id="sshBootstrapAliases">' +
+                (state.sshHosts || []).map(item => '<option value="' + esc(item.hostAlias) + '"></option>').join("") +
+              '</datalist>' +
+            '</div>' +
+            '<div class="field" style="margin-bottom:16px">' +
+              '<label>DJN 密码（一次性，不会保存）*</label>' +
+              '<input name="djnPassword" type="password" autocomplete="new-password" />' +
+            '</div>' +
+          '</div>' +
+          '<div class="actions">' +
+            '<button class="primary" type="submit">开始部署</button>' +
+            '<button class="ghost" type="button" id="addWorkerCancelForm">取消</button>' +
+          '</div>' +
+        '</form>';
+    }
+
+    function renderProvisionProgress() {
+      const job = state.provisionJob?.detail;
+      if (!job) {
+        return '<div class="empty">正在加载部署状态...</div>';
+      }
+      const stepsHtml = (job.steps || []).map(step =>
+        '<div class="queue-row">' +
+          '<div class="queue-title"><strong>' + esc(step.label) + '</strong>' + badge(step.status) + '</div>' +
+        '</div>'
+      ).join("");
+      const actions = [];
+      if (job.status === "running" || job.status === "pending") {
+        actions.push('<button class="ghost" type="button" id="provisionCancelBtn">取消</button>');
+      }
+      if (job.status === "succeeded") {
+        actions.push('<button class="primary" type="button" id="provisionCloseBtn">关闭</button>');
+      }
+      if (job.status === "failed" || job.status === "cancelled") {
+        actions.push('<button class="primary" type="button" id="provisionRetryBtn">重试</button>');
+        actions.push('<button class="ghost" type="button" id="provisionCloseBtn">关闭</button>');
+      }
+      return '' +
+        '<div class="detail-grid" style="margin-bottom:16px">' +
+          '<div class="stat"><div class="subtle">Job</div><strong><code>' + esc(job.jobId) + '</code></strong></div>' +
+          '<div class="stat"><div class="subtle">Worker</div><strong><code>' + esc(job.workerId) + '</code></strong></div>' +
+          '<div class="stat"><div class="subtle">Status</div><strong>' + badge(job.status) + '</strong></div>' +
+        '</div>' +
+        stepsHtml +
+        (job.errorText ? '<div class="empty" style="color:var(--bad);margin-top:12px">' + esc(job.errorText) + '</div>' : '') +
+        '<pre style="margin-top:12px;max-height:240px">' + esc(job.logTail || "") + '</pre>' +
+        '<div class="actions" style="margin-top:12px">' + actions.join("") + '</div>';
+    }
+
+    async function renderAddWorkerModal() {
+      const body = document.getElementById("addWorkerModalBody");
+      if (state.addWorkerPhase === "form") {
+        await loadSshHosts();
+        body.innerHTML = renderAddWorkerForm();
+        const form = document.getElementById("addWorkerForm");
+        const freshFields = document.getElementById("freshOnlyFields");
+        const syncMode = () => {
+          const mode = form.elements.deployMode.value;
+          freshFields.classList.toggle("hidden", mode !== "fresh");
+        };
+        form.querySelectorAll('input[name="deployMode"]').forEach(input => {
+          input.addEventListener("change", syncMode);
+        });
+        syncMode();
+        document.getElementById("addWorkerCancelForm").addEventListener("click", closeAddWorkerModal);
+        form.addEventListener("submit", submitAddWorkerForm);
+        return;
+      }
+      body.innerHTML = renderProvisionProgress();
+      bindProvisionProgressActions();
+    }
+
+    async function submitAddWorkerForm(event) {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const mode = String(form.get("deployMode") || "fresh");
+      const payload = {
+        workerId: String(form.get("workerId") || "").trim(),
+        displayName: String(form.get("displayName") || "").trim() || String(form.get("workerId") || "").trim(),
+        slotsTotal: Number(form.get("slotsTotal") || 1),
+        mode,
+        sshHostAlias: String(form.get("sshHostAlias") || "").trim(),
+        tunnelRemotePort: Number(form.get("tunnelRemotePort") || 17380),
+      };
+      if (mode === "fresh") {
+        payload.sshBootstrapHostAlias = String(form.get("sshBootstrapHostAlias") || "").trim();
+        payload.djnPassword = String(form.get("djnPassword") || "");
+      }
+      const result = await api("/api/workers/provision", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      });
+      state.provisionJob = { jobId: result.jobId, workerId: result.workerId };
+      state.addWorkerPhase = "progress";
+      await renderAddWorkerModal();
+      startProvisionPolling();
+    }
+
+    async function pollProvisionJob() {
+      if (!state.provisionJob?.jobId) return;
+      const detail = await api("/api/workers/provision/" + encodeURIComponent(state.provisionJob.jobId));
+      state.provisionJob.detail = detail;
+      document.getElementById("addWorkerModalBody").innerHTML = renderProvisionProgress();
+      bindProvisionProgressActions();
+      if (["succeeded", "failed", "cancelled"].includes(detail.status)) {
+        clearInterval(provisionPollTimer);
+        provisionPollTimer = null;
+        await loadDashboard();
+      }
+    }
+
+    function startProvisionPolling() {
+      if (provisionPollTimer) clearInterval(provisionPollTimer);
+      pollProvisionJob();
+      provisionPollTimer = setInterval(pollProvisionJob, 2000);
+    }
+
+    function bindProvisionProgressActions() {
+      const cancelBtn = document.getElementById("provisionCancelBtn");
+      if (cancelBtn) {
+        cancelBtn.addEventListener("click", async () => {
+          await api("/api/workers/provision/" + encodeURIComponent(state.provisionJob.jobId) + "/cancel", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: "{}",
+          });
+          await pollProvisionJob();
+        });
+      }
+      const closeBtn = document.getElementById("provisionCloseBtn");
+      if (closeBtn) closeBtn.addEventListener("click", closeAddWorkerModal);
+      const retryBtn = document.getElementById("provisionRetryBtn");
+      if (retryBtn) {
+        retryBtn.addEventListener("click", () => {
+          state.addWorkerPhase = "form";
+          state.provisionJob = null;
+          renderAddWorkerModal();
+        });
+      }
     }
 
     function collectCreateFormPayload(form) {
@@ -1275,6 +1521,16 @@ INDEX_HTML = """<!doctype html>
       if (event.target.id === "previewModal") {
         closePreviewModal();
       }
+    });
+
+    document.getElementById("openAddWorkerBtn").addEventListener("click", () => {
+      state.addWorkerPhase = "form";
+      state.provisionJob = null;
+      openAddWorkerModal();
+    });
+    document.getElementById("addWorkerModalClose").addEventListener("click", closeAddWorkerModal);
+    document.getElementById("addWorkerModal").addEventListener("click", (event) => {
+      if (event.target.id === "addWorkerModal") closeAddWorkerModal();
     });
 
     setTab(window.location.pathname === "/create" ? "create" : "tasks");
