@@ -768,6 +768,16 @@ INDEX_HTML = """<!doctype html>
       return res.json();
     }
 
+    function formatApiError(error) {
+      const raw = String(error?.message || error || "").trim();
+      if (!raw) return "请求失败";
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed.error) return String(parsed.error);
+      } catch (_error) {}
+      return raw;
+    }
+
     let toastTimer = null;
     function showToast(message) {
       const el = document.getElementById("toast");
@@ -1687,22 +1697,39 @@ INDEX_HTML = """<!doctype html>
 
     async function submitCreateTaskForm(event) {
       event.preventDefault();
-      const payload = collectCreateFormPayload(event.target);
+      const form = event.target;
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const payload = collectCreateFormPayload(form);
       if (!payload.workerIds.length) {
         alert("至少选择一个 worker。");
         return;
       }
-      const result = await api("/api/eval-tasks/create-and-distribute", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload),
-      });
-      state.createResult = result;
-      renderCreateResult();
-      if (result.syncJobId && result.run?.run_id) {
-        startSyncPolling(result.run.run_id);
-      } else {
-        await loadDashboard();
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.dataset.originalLabel = submitBtn.textContent;
+        submitBtn.textContent = "创建中…";
+      }
+      try {
+        const result = await api("/api/eval-tasks/create-and-distribute", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        state.createResult = result;
+        renderCreateResult();
+        showToast("任务已创建，正在同步资产到 worker");
+        if (result.syncJobId && result.run?.run_id) {
+          startSyncPolling(result.run.run_id);
+        } else {
+          await loadDashboard();
+        }
+      } catch (error) {
+        showToast("创建失败：" + formatApiError(error));
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = submitBtn.dataset.originalLabel || "创建并分发任务";
+        }
       }
     }
 
