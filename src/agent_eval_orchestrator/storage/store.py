@@ -180,6 +180,33 @@ class Store:
                 );
                 """
             )
+
+            run_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(runs)").fetchall()
+            }
+            for column, ddl in {
+                "sync_status": "TEXT NOT NULL DEFAULT ''",
+                "sync_job_id": "TEXT",
+                "sync_manifest_json": "TEXT NOT NULL DEFAULT '{}'",
+            }.items():
+                if column not in run_columns:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
+
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS asset_sync_jobs (
+                    job_id       TEXT PRIMARY KEY,
+                    run_id       TEXT NOT NULL,
+                    status       TEXT NOT NULL,
+                    current_step TEXT,
+                    steps_json   TEXT NOT NULL,
+                    log_text     TEXT NOT NULL DEFAULT '',
+                    error_text   TEXT,
+                    created_at   TEXT NOT NULL,
+                    finished_at  TEXT
+                );
+                """
+            )
             self._drop_case_details_column_if_present(conn)
 
     def _make_tunnel_remote_port_nullable(self, conn: sqlite3.Connection) -> None:
@@ -366,6 +393,13 @@ class Store:
             ).fetchall()
         return [self._batch_item(row) for row in rows]
 
+    def is_run_terminal(self, run_id: str) -> bool:
+        batches = self.list_batches_for_run(run_id)
+        if not batches:
+            return False
+        terminal = {"succeeded", "failed", "stopped", "sync_failed"}
+        return all(str(batch["status"]) in terminal for batch in batches)
+
     def create_batch(
         self,
         *,
@@ -373,6 +407,7 @@ class Store:
         selected_case_ids: list[str],
         preferred_worker_id: str | None,
         batch_options: dict[str, Any] | None,
+        initial_status: str = "queued",
     ) -> dict[str, Any]:
         run = self.get_run(run_id)
         if not run:
@@ -393,12 +428,13 @@ class Store:
                     selected_case_ids_json, batch_options_json, summary_json,
                     artifact_index_json, batch_root, created_at, started_at, finished_at,
                     error_text
-                ) VALUES(?, ?, ?, 'queued', NULL, ?, NULL, ?, '{}', ?, ?, '{}', '{}', ?, ?, NULL, NULL, NULL)
+                ) VALUES(?, ?, ?, ?, NULL, ?, NULL, ?, '{}', ?, ?, '{}', '{}', ?, ?, NULL, NULL, NULL)
                 """,
                 (
                     batch_id,
                     run_id,
                     run["owner"],
+                    initial_status,
                     preferred_worker_id,
                     template["executor_kind"],
                     json.dumps(selected_case_ids, ensure_ascii=False),
@@ -421,6 +457,7 @@ class Store:
         selected_case_ids: list[str],
         worker_ids: list[str],
         batch_options: dict[str, Any] | None,
+        initial_status: str = "queued",
     ) -> list[dict[str, Any]]:
         if not selected_case_ids:
             raise RuntimeError("selected_case_ids must not be empty")
@@ -439,9 +476,65 @@ class Store:
                     selected_case_ids=case_ids,
                     preferred_worker_id=worker_id,
                     batch_options={**options, "concurrency": min(max_concurrency, len(case_ids))},
+                    initial_status=initial_status,
                 )
             )
         return created
+
+    def promote_worker_batches_to_queued(self, *, run_id: str, worker_id: str) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE batches
+                SET status = 'queued'
+                WHERE run_id = ? AND preferred_worker_id = ? AND status = 'pending_sync'
+                """,
+                (run_id, worker_id),
+            )
+        return int(cursor.rowcount)
+
+    def mark_worker_batches_sync_failed(self, *, run_id: str, worker_id: str) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE batches
+                SET status = 'sync_failed'
+                WHERE run_id = ? AND preferred_worker_id = ? AND status = 'pending_sync'
+                """,
+                (run_id, worker_id),
+            )
+        return int(cursor.rowcount)
+
+    def update_task_template_executor_config(
+        self,
+        template_id: str,
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        template = self.get_task_template(template_id)
+        if not template:
+            raise RuntimeError("template not found")
+        config = dict(template["executor_config"])
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(config.get(key), dict):
+                merged = dict(config[key])
+                merged.update(value)
+                config[key] = merged
+            else:
+                config[key] = value
+        now = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE task_templates
+                SET executor_config_json = ?, updated_at = ?
+                WHERE template_id = ?
+                """,
+                (json.dumps(config, ensure_ascii=False), now, template_id),
+            )
+        updated = self.get_task_template(template_id)
+        if not updated:
+            raise RuntimeError("template not found after update")
+        return updated
 
     def _weighted_case_groups(
         self,
@@ -796,6 +889,137 @@ class Store:
         item["log_tail"] = item["log_text"][-8192:] if item.get("log_text") else ""
         return item
 
+    def update_run_sync_fields(
+        self,
+        *,
+        run_id: str,
+        sync_status: str | None = None,
+        sync_job_id: str | None = None,
+        sync_manifest: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        run = self.get_run(run_id)
+        if not run:
+            return None
+        next_status = sync_status if sync_status is not None else str(run.get("sync_status") or "")
+        next_job_id = sync_job_id if sync_job_id is not None else run.get("sync_job_id")
+        next_manifest = (
+            json.dumps(sync_manifest, ensure_ascii=False)
+            if sync_manifest is not None
+            else json.dumps(run.get("sync_manifest") or {}, ensure_ascii=False)
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET sync_status = ?, sync_job_id = ?, sync_manifest_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_status, next_job_id, next_manifest, now_iso(), run_id),
+            )
+        return self.get_run(run_id)
+
+    def create_asset_sync_job(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        steps: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO asset_sync_jobs(
+                    job_id, run_id, status, current_step,
+                    steps_json, log_text, error_text, created_at, finished_at
+                ) VALUES(?, ?, 'pending', NULL, ?, '', NULL, ?, NULL)
+                """,
+                (job_id, run_id, json.dumps(steps, ensure_ascii=False), now),
+            )
+            row = conn.execute(
+                "SELECT * FROM asset_sync_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._asset_sync_job_item(row)
+
+    def get_asset_sync_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM asset_sync_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._asset_sync_job_item(row) if row else None
+
+    def get_asset_sync_job_for_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM asset_sync_jobs
+                WHERE run_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return self._asset_sync_job_item(row) if row else None
+
+    def append_asset_sync_log(self, job_id: str, chunk: str) -> None:
+        if not chunk:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE asset_sync_jobs SET log_text = log_text || ? WHERE job_id = ?",
+                (chunk, job_id),
+            )
+
+    def update_asset_sync_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        current_step: str | None = None,
+        steps: list[dict[str, Any]] | None = None,
+        error_text: str | None = None,
+        finished: bool = False,
+    ) -> dict[str, Any] | None:
+        now = now_iso()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM asset_sync_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            next_status = status or str(row["status"])
+            next_step = current_step if current_step is not None else row["current_step"]
+            next_steps_json = (
+                json.dumps(steps, ensure_ascii=False)
+                if steps is not None
+                else str(row["steps_json"])
+            )
+            next_error = error_text if error_text is not None else row["error_text"]
+            finished_at = now if finished else row["finished_at"]
+            conn.execute(
+                """
+                UPDATE asset_sync_jobs
+                SET status = ?, current_step = ?, steps_json = ?,
+                    error_text = ?, finished_at = ?
+                WHERE job_id = ?
+                """,
+                (next_status, next_step, next_steps_json, next_error, finished_at, job_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM asset_sync_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._asset_sync_job_item(updated)
+
+    def _asset_sync_job_item(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["steps"] = json.loads(item.pop("steps_json"))
+        item["log_tail"] = item["log_text"][-8192:] if item.get("log_text") else ""
+        return item
+
     def list_workers(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM workers ORDER BY worker_id").fetchall()
@@ -1102,7 +1326,10 @@ class Store:
         for run in runs:
             template = templates.get(str(run["template_id"]))
             run_batches = batches_by_run.get(str(run["run_id"]), [])
-            status_counts = {"queued": 0, "running": 0, "succeeded": 0, "failed": 0, "stopped": 0}
+            status_counts = {
+                "queued": 0, "pending_sync": 0, "sync_failed": 0,
+                "running": 0, "succeeded": 0, "failed": 0, "stopped": 0,
+            }
             workers = []
             case_total = 0
             case_succeeded = 0
@@ -1123,7 +1350,9 @@ class Store:
             overall_status = "idle"
             if status_counts["running"] > 0:
                 overall_status = "running"
-            elif status_counts["failed"] > 0:
+            elif status_counts["pending_sync"] > 0:
+                overall_status = "syncing"
+            elif status_counts["failed"] > 0 or status_counts["sync_failed"] > 0:
                 overall_status = "failed"
             elif status_counts["queued"] > 0:
                 overall_status = "queued"
@@ -1151,6 +1380,7 @@ class Store:
                     "caseFailed": case_failed,
                     "latestBatchId": latest_batch["batch_id"] if latest_batch else None,
                     "latestUpdatedAt": latest_batch["finished_at"] if latest_batch and latest_batch["finished_at"] else latest_batch["started_at"] if latest_batch else None,
+                    "syncStatus": str(run.get("sync_status") or ""),
                 }
             )
         return summaries
@@ -1298,7 +1528,12 @@ class Store:
         return item
 
     def _run_item(self, row: sqlite3.Row | None) -> dict[str, Any]:
-        return dict(row)
+        item = dict(row)
+        manifest_raw = item.pop("sync_manifest_json", "{}")
+        item["sync_manifest"] = json.loads(manifest_raw or "{}")
+        if not item.get("sync_status"):
+            item["sync_status"] = ""
+        return item
 
     def _batch_item(self, row: sqlite3.Row | None) -> dict[str, Any]:
         item = dict(row)

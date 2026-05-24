@@ -24,7 +24,7 @@ def test_decommission_worker_skipped_without_ssh_alias(store, sample_ssh_config)
 def test_decommission_worker_done(store, sample_ssh_config):
     provisioner = _provisioner(store, sample_ssh_config)
     provisioner.tunnels.kill_tunnel = MagicMock()
-    with patch.object(provisioner, "_ssh_run") as ssh_run:
+    with patch.object(provisioner.ssh, "ssh_run") as ssh_run:
         ssh_run.return_value.returncode = 0
         ssh_run.return_value.stderr = ""
         result = provisioner.decommission_worker(worker_id="w1", ssh_host_alias="aeo-ecs-0004")
@@ -37,7 +37,7 @@ def test_decommission_worker_done(store, sample_ssh_config):
 def test_decommission_worker_partial_on_tunnel_failure(store, sample_ssh_config):
     provisioner = _provisioner(store, sample_ssh_config)
     provisioner.tunnels.kill_tunnel = MagicMock(side_effect=RuntimeError("no pid"))
-    with patch.object(provisioner, "_ssh_run") as ssh_run:
+    with patch.object(provisioner.ssh, "ssh_run") as ssh_run:
         ssh_run.return_value.returncode = 0
         ssh_run.return_value.stderr = ""
         result = provisioner.decommission_worker(worker_id="w1", ssh_host_alias="aeo-ecs-0004")

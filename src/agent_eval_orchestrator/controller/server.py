@@ -29,7 +29,13 @@ from agent_eval_orchestrator.core.defaults import (
     DEFAULT_TIMEOUT_MULTIPLIER,
     DEFAULT_VERIFIER_TIMEOUT_MULTIPLIER,
 )
-from agent_eval_orchestrator.core.ids import now_iso, sanitize_name
+from agent_eval_orchestrator.core.ids import new_id, now_iso, sanitize_name
+from agent_eval_orchestrator.controller.asset_syncer import (
+    AssetSyncer,
+    build_sync_manifest,
+    initial_worker_steps,
+    validate_create_task_assets,
+)
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
 from agent_eval_orchestrator.controller.provisioner import Provisioner
 from agent_eval_orchestrator.controller.ssh_config import list_ssh_hosts, test_ssh_alias
@@ -381,6 +387,39 @@ def _build_executor_config(
     }
 
 
+def _build_asset_sync_executor_config(
+    *,
+    worker_ids: list[str],
+    workers: list[dict[str, object]],
+    body_config: dict[str, object],
+    jobs_dir: str,
+) -> dict[str, object]:
+    workers_by_id = {str(worker["worker_id"]): worker for worker in workers}
+    harbor_repo_by_worker = {
+        worker_id: _default_harbor_for_worker(worker_id, workers_by_id.get(worker_id))
+        for worker_id in worker_ids
+    }
+    uv_binary_by_worker = {
+        worker_id: _default_uv_for_worker(worker_id, workers_by_id.get(worker_id))
+        for worker_id in worker_ids
+    }
+    return {
+        **_build_executor_config(
+            dataset_ref="",
+            worker_ids=worker_ids,
+            workers=workers,
+            body_config=body_config,
+            jobs_dir=jobs_dir,
+        ),
+        "useAssetSync": True,
+        "datasetPathByWorker": {},
+        "mountsByWorker": {},
+        "agentEnvByWorker": {},
+        "harborRepoPathByWorker": harbor_repo_by_worker,
+        "uvBinaryByWorker": uv_binary_by_worker,
+    }
+
+
 def _validate_controller_internal_ip(value: str) -> bool:
     import ipaddress
 
@@ -440,7 +479,9 @@ class Handler(BaseHTTPRequestHandler):
     viewer_manager: HarborViewerManager | None = None
     global_viewer_process: subprocess.Popen | None = None
     provisioner: Provisioner | None = None
+    asset_syncer: AssetSyncer | None = None
     ssh_config_path: Path | None = None
+    controller_shared_root: Path | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[controller] {self.address_string()} {fmt % args}", flush=True)
@@ -727,6 +768,53 @@ class Handler(BaseHTTPRequestHandler):
             text = target.read_text(encoding="utf-8", errors="replace")
             _json_response(self, {"path": str(target), "content": text[-200000:]})
             return
+        if path.startswith("/api/runs/") and path.endswith("/sync"):
+            run_id = path.split("/")[3]
+            run = self.store.get_run(run_id)
+            if not run:
+                _json_response(self, {"error": "run not found"}, 404)
+                return
+            job = self.store.get_asset_sync_job_for_run(run_id)
+            if not job:
+                _json_response(self, {"error": "sync job not found"}, 404)
+                return
+            _json_response(
+                self,
+                {
+                    "runId": run_id,
+                    "syncStatus": run.get("sync_status") or "",
+                    "jobId": job["job_id"],
+                    "status": job["status"],
+                    "currentStep": job["current_step"],
+                    "steps": job["steps"],
+                    "logTail": job["log_tail"],
+                    "errorText": job["error_text"],
+                    "createdAt": job["created_at"],
+                    "finishedAt": job["finished_at"],
+                },
+            )
+            return
+        if path.startswith("/api/sync-jobs/"):
+            job_id = path.split("/")[3]
+            job = self.store.get_asset_sync_job(job_id)
+            if not job:
+                _json_response(self, {"error": "job not found"}, 404)
+                return
+            _json_response(
+                self,
+                {
+                    "jobId": job["job_id"],
+                    "runId": job["run_id"],
+                    "status": job["status"],
+                    "currentStep": job["current_step"],
+                    "steps": job["steps"],
+                    "logTail": job["log_tail"],
+                    "errorText": job["error_text"],
+                    "createdAt": job["created_at"],
+                    "finishedAt": job["finished_at"],
+                },
+            )
+            return
         if path.startswith("/api/runs/"):
             run_id = path.split("/")[3]
             run = self.store.get_run(run_id)
@@ -772,10 +860,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/eval-tasks/create-and-distribute":
             try:
                 owner = DEFAULT_OWNER
-                dataset_ref = str(body["datasetRef"])
-                allowed_dataset_refs = set(self.store.list_dataset_refs())
-                if dataset_ref not in allowed_dataset_refs:
-                    raise RuntimeError("dataset_ref must be one of the preset datasets")
+                dataset_path = Path(str(body["datasetPath"])).expanduser()
+                bitfun_cli_path = Path(str(body["bitfunCliPath"])).expanduser()
+                bitfun_config_dir = Path(str(body["bitfunConfigDir"])).expanduser()
                 worker_ids = [
                     str(item).strip()
                     for item in body.get("workerIds") or []
@@ -787,23 +874,31 @@ class Handler(BaseHTTPRequestHandler):
                     if str(item).strip()
                 ]
                 if not case_ids:
-                    case_ids = self.store.list_dataset_case_ids(dataset_ref)
-                if not worker_ids:
-                    raise RuntimeError("worker_ids must not be empty")
+                    case_ids = self.store.list_dataset_case_ids(str(dataset_path))
+                workers = self.store.list_workers()
+                controller_root = (self.controller_shared_root or self.store.layout.root).expanduser()
+                validate_create_task_assets(
+                    dataset_path=dataset_path,
+                    bitfun_cli_path=bitfun_cli_path,
+                    bitfun_config_dir=bitfun_config_dir,
+                    case_ids=case_ids,
+                    workers=workers,
+                    worker_ids=worker_ids,
+                    controller_shared_root=controller_root,
+                )
                 jobs_dir = str(body.get("jobsDir") or DEFAULT_JOBS_DIR).strip() or str(DEFAULT_JOBS_DIR)
                 body_config = dict(body.get("executorConfig") or {})
-                executor_config = _build_executor_config(
-                    dataset_ref=dataset_ref,
+                executor_config = _build_asset_sync_executor_config(
                     worker_ids=worker_ids,
-                    workers=self.store.list_workers(),
+                    workers=workers,
                     body_config=body_config,
                     jobs_dir=jobs_dir,
                 )
-                task_name = str(body.get("name") or "").strip() or f"{Path(dataset_ref).name}-{now_iso()[:19]}"
+                task_name = str(body.get("name") or "").strip() or f"{dataset_path.name}-{now_iso()[:19]}"
                 template = self.store.create_task_template(
                     owner=owner,
                     name=task_name,
-                    dataset_ref=dataset_ref,
+                    dataset_ref=str(dataset_path),
                     executor_kind="harbor-docker",
                     executor_config=executor_config,
                     model_profile_ref=str(body.get("modelProfileRef") or "") or None,
@@ -819,7 +914,41 @@ class Handler(BaseHTTPRequestHandler):
                             body_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY
                         )
                     },
+                    initial_status="pending_sync",
                 )
+                workers_by_id = {str(item["worker_id"]): item for item in workers}
+                worker_shards = {
+                    str(batch["preferred_worker_id"]): list(batch["selected_case_ids"])
+                    for batch in batches
+                }
+                manifest = build_sync_manifest(
+                    run_id=str(run["run_id"]),
+                    dataset_path=dataset_path.resolve(),
+                    bitfun_cli_path=bitfun_cli_path.resolve(),
+                    bitfun_config_dir=bitfun_config_dir.resolve(),
+                    worker_shards=worker_shards,
+                    workers_by_id=workers_by_id,
+                    controller_shared_root=controller_root,
+                )
+                sync_job_id = new_id("sync")
+                self.store.update_run_sync_fields(
+                    run_id=str(run["run_id"]),
+                    sync_status="pending",
+                    sync_job_id=sync_job_id,
+                    sync_manifest=manifest,
+                )
+                self.store.create_asset_sync_job(
+                    job_id=sync_job_id,
+                    run_id=str(run["run_id"]),
+                    steps=initial_worker_steps(worker_ids),
+                )
+                if self.asset_syncer is not None:
+                    self.asset_syncer.start_job_async(
+                        job_id=sync_job_id,
+                        run_id=str(run["run_id"]),
+                        template_id=str(template["template_id"]),
+                    )
+                run = self.store.get_run(str(run["run_id"])) or run
             except KeyError as exc:
                 _json_response(self, {"error": f"missing field: {exc}"}, 400)
                 return
@@ -830,8 +959,12 @@ class Handler(BaseHTTPRequestHandler):
                 self,
                 {
                     "template": template,
-                    "run": run,
+                    "run": {
+                        **run,
+                        "syncStatus": run.get("sync_status") or "pending",
+                    },
                     "batches": batches,
+                    "syncJobId": sync_job_id,
                 },
                 201,
             )
@@ -1000,7 +1133,6 @@ class Handler(BaseHTTPRequestHandler):
                     return
             display_name = str(body.get("displayName") or worker_id)
             slots_total = int(body.get("slotsTotal") or 1)
-            from agent_eval_orchestrator.core.ids import new_id
 
             job_id = new_id("prov")
             self.store.create_provisioning_worker(
@@ -1136,6 +1268,12 @@ class Handler(BaseHTTPRequestHandler):
             if not batch:
                 _json_response(self, {"error": "batch not found"}, 404)
                 return
+            if self.asset_syncer is not None:
+                batch_row = self.store.get_batch(str(body["batchId"]))
+                if batch_row and self.store.is_run_terminal(str(batch_row["run_id"])):
+                    run = self.store.get_run(str(batch_row["run_id"]))
+                    if run and str(run.get("sync_status") or "") in {"succeeded", "failed"}:
+                        self.asset_syncer.cleanup_run_sync_assets(str(batch_row["run_id"]))
             _json_response(self, {"batch": batch})
             return
         _json_response(self, {"error": "not found"}, 404)
@@ -1231,10 +1369,17 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap_script_path=bootstrap_script,
         tunnel_state_path=layout.controller_dir / "tunnels.json",
     )
+    asset_syncer = AssetSyncer(
+        store=store,
+        ssh_config_path=ssh_config_path,
+        controller_shared_root=layout.root,
+    )
     server = ThreadedServer((args.host, args.port), Handler)
     Handler.store = store
     Handler.auth_token = str(args.auth_token or "") or None
     Handler.provisioner = provisioner
+    Handler.asset_syncer = asset_syncer
+    Handler.controller_shared_root = layout.root
     Handler.ssh_config_path = ssh_config_path
     Handler.viewer_manager = HarborViewerManager(
         harbor_repo=Path("/root/projects/harbor").resolve(),

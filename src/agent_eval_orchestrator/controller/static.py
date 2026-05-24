@@ -571,8 +571,16 @@ INDEX_HTML = """<!doctype html>
 
             <div class="detail-grid" style="margin-bottom:16px">
               <div class="field">
-                <label>Dataset Ref</label>
-                <select name="datasetRef" id="datasetRefSelect" required></select>
+                <label>Dataset Path</label>
+                <input name="datasetPath" id="datasetPathInput" placeholder="/root/projects/agent-eval-orchestrator/datasets/swe-bench-verified" required />
+              </div>
+              <div class="field">
+                <label>BitFun CLI Path</label>
+                <input name="bitfunCliPath" value="/root/projects/BitFun/target/release/bitfun-cli" required />
+              </div>
+              <div class="field">
+                <label>BitFun Config Dir</label>
+                <input name="bitfunConfigDir" value="/root/.config/bitfun" required />
               </div>
               <div class="field">
                 <label>Jobs Dir</label>
@@ -587,7 +595,7 @@ INDEX_HTML = """<!doctype html>
 
             <div style="margin-bottom:16px">
               <h3 style="margin-bottom:10px">Workers</h3>
-              <div class="subtle" style="margin-bottom:10px">勾选参与执行的 worker；Harbor、dataset、uv 路径由 controller 基于 worker 注册信息自动推断</div>
+              <div class="subtle" style="margin-bottom:10px">勾选参与执行的 worker；创建后 controller 会将 dataset shard 与 bitfun-cli 同步到各 worker</div>
               <div id="createWorkerConfigs"></div>
             </div>
 
@@ -673,16 +681,38 @@ INDEX_HTML = """<!doctype html>
       sshHosts: [],
       addWorkerPhase: "form",
       pendingDeleteWorkerId: null,
+      syncPollTimer: null,
+      syncJob: null,
     };
 
-    function badge(value) {
+    function badge(value, cls) {
       const lower = String(value || "").toLowerCase();
-      let cls = "idle";
-      if (["online", "finished", "succeeded", "completed", "enabled"].includes(lower)) cls = "ok";
-      else if (["running", "queued", "provisioning"].includes(lower)) cls = "warn";
-      else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed", "interrupted", "provision_failed"].includes(lower)) cls = "bad";
-      else if (["missing-result"].includes(lower)) cls = "warn";
+      if (!cls) {
+        cls = "idle";
+        if (["online", "finished", "succeeded", "completed", "enabled", "ready", "cleaned"].includes(lower)) cls = "ok";
+        else if (["running", "queued", "provisioning", "syncing", "cleaning"].includes(lower)) cls = "warn";
+        else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed", "interrupted", "provision_failed", "sync_failed", "danger"].includes(lower)) cls = "bad";
+        else if (["missing-result"].includes(lower)) cls = "warn";
+      } else if (cls === "danger") {
+        cls = "bad";
+      } else if (cls === "ok") {
+        cls = "ok";
+      }
       return '<span class="badge ' + cls + '">' + value + "</span>";
+    }
+
+    function syncStatusBadge(syncStatus) {
+      if (!syncStatus) return "";
+      const map = {
+        pending: ["syncing", "warn"],
+        running: ["syncing", "warn"],
+        succeeded: ["ready", "ok"],
+        failed: ["sync_failed", "danger"],
+        cleaning: ["cleaning", "warn"],
+        cleaned: ["cleaned", "ok"],
+      };
+      const entry = map[syncStatus] || [syncStatus, "warn"];
+      return badge(entry[0], entry[1]);
     }
 
     function fmtNumber(value) {
@@ -867,22 +897,16 @@ INDEX_HTML = """<!doctype html>
     }
 
     function renderDatasetOptions() {
-      const list = document.getElementById("datasetRefSelect");
+      const input = document.getElementById("datasetPathInput");
       const form = document.getElementById("createTaskForm");
-      if (!list || !form) return;
-      const previous = String(form.elements.datasetRef.value || "").trim();
-      list.innerHTML = (state.datasets || []).map(item =>
-        '<option value="' + esc(item.path) + '">' + esc(item.label) + '</option>'
-      ).join("");
-      const available = new Set((state.datasets || []).map(item => String(item.path || "")));
-      const restored = previous && available.has(previous) ? previous : "";
-      if (restored) {
-        form.elements.datasetRef.value = restored;
+      if (!input || !form) return;
+      const previous = String(form.elements.datasetPath.value || "").trim();
+      if (previous) {
         return;
       }
       const preferred = preferredDatasetRef();
       if (preferred) {
-        form.elements.datasetRef.value = preferred;
+        form.elements.datasetPath.value = preferred;
       }
     }
 
@@ -917,7 +941,7 @@ INDEX_HTML = """<!doctype html>
       el.innerHTML = tasks.map(task => {
         const active = task.evalTaskId === state.selectedTaskId ? " active" : "";
         return '<button class="item' + active + '" data-task-id="' + esc(task.evalTaskId) + '">' +
-          '<div class="item-title"><strong>' + esc(task.name) + '</strong>' + badge(task.status) + '</div>' +
+          '<div class="item-title"><strong>' + esc(task.name) + '</strong>' + badge(task.status) + syncStatusBadge(task.syncStatus) + '</div>' +
           '<div class="item-meta">' +
             '<span>executor: <code>' + esc(task.executorKind) + '</code></span>' +
             '<span>dataset: <code>' + esc(task.datasetRef) + '</code></span>' +
@@ -989,7 +1013,10 @@ INDEX_HTML = """<!doctype html>
       const run = detail.run;
       const groups = detail.workerGroups || [];
       document.getElementById("taskDetailTitle").textContent = run.display_name;
-      document.getElementById("taskDetailHint").textContent = (template ? template.name + " · " : "") + (template ? template.dataset_ref : "");
+      document.getElementById("taskDetailHint").textContent =
+        (template ? template.name + " · " : "") +
+        (template ? template.dataset_ref : "") +
+        (run.sync_status ? " · sync: " + run.sync_status : "");
 
       root.innerHTML =
         '<div class="detail-grid">' +
@@ -1189,6 +1216,13 @@ INDEX_HTML = """<!doctype html>
       const item = state.createResult;
       root.classList.remove("hidden");
       root.className = "panel";
+      if (item.syncJobId && state.syncJob?.detail) {
+        root.innerHTML = renderSyncProgress(state.syncJob.detail);
+        return;
+      }
+      const syncNote = item.syncJobId
+        ? '<div class="subtle" style="margin-top:8px">资产同步已启动，进度将自动刷新</div>'
+        : "";
       root.innerHTML = '' +
         '<div class="detail">' +
           '<div class="item-title"><strong>任务已创建并开始分发</strong>' + badge("created") + '</div>' +
@@ -1197,6 +1231,7 @@ INDEX_HTML = """<!doctype html>
             '<span>template: <code>' + esc(item.template.template_id) + '</code></span>' +
             '<span>batches: ' + (item.batches || []).length + '</span>' +
           '</div>' +
+          syncNote +
           '<div class="actions" style="margin-top:10px">' +
             '<button class="primary" type="button" id="openCreatedTaskBtn">查看这个 task</button>' +
           '</div>' +
@@ -1210,6 +1245,48 @@ INDEX_HTML = """<!doctype html>
           await loadDashboard();
         });
       }
+    }
+
+    function renderSyncProgress(detail) {
+      const workerBlocks = (detail.steps || []).map(workerEntry => {
+        const steps = (workerEntry.steps || []).map(step =>
+          '<div class="step-row">' +
+            '<span>' + esc(step.label || step.id) + '</span>' +
+            badge(step.status || "pending") +
+          '</div>'
+        ).join("");
+        return '<div class="detail" style="margin-top:10px">' +
+          '<div class="item-title"><strong>' + esc(workerEntry.workerId) + '</strong></div>' +
+          steps +
+        '</div>';
+      }).join("");
+      return '' +
+        '<div class="item-title"><strong>资产同步中</strong>' + badge(detail.status || "pending") + '</div>' +
+        workerBlocks +
+        (detail.errorText ? '<pre class="error-text">' + esc(detail.errorText) + '</pre>' : '') +
+        (detail.logTail ? '<pre class="log-tail">' + esc(detail.logTail.slice(-4000)) + '</pre>' : '');
+    }
+
+    async function pollSyncJob() {
+      if (!state.syncJob?.runId) return;
+      const detail = await api("/api/runs/" + encodeURIComponent(state.syncJob.runId) + "/sync");
+      state.syncJob.detail = detail;
+      const root = document.getElementById("createResult");
+      if (root) {
+        root.innerHTML = renderSyncProgress(detail);
+      }
+      if (["succeeded", "failed"].includes(detail.status)) {
+        clearInterval(state.syncPollTimer);
+        state.syncPollTimer = null;
+        await loadDashboard();
+      }
+    }
+
+    function startSyncPolling(runId) {
+      state.syncJob = { runId };
+      if (state.syncPollTimer) clearInterval(state.syncPollTimer);
+      pollSyncJob();
+      state.syncPollTimer = setInterval(pollSyncJob, 2500);
     }
 
     function closePreviewModal() {
@@ -1588,13 +1665,12 @@ INDEX_HTML = """<!doctype html>
       const concurrency = Number(data.get("nConcurrent") || 1);
       return {
         name: String(data.get("name") || "").trim(),
-        datasetRef: String(data.get("datasetRef") || "").trim(),
+        datasetPath: String(data.get("datasetPath") || "").trim(),
+        bitfunCliPath: String(data.get("bitfunCliPath") || "").trim(),
+        bitfunConfigDir: String(data.get("bitfunConfigDir") || "").trim(),
         jobsDir: String(data.get("jobsDir") || "/root/projects/harbor/jobs").trim(),
         workerIds,
         selectedCaseIds,
-        batchOptions: {
-          concurrency,
-        },
         executorConfig: {
           agentName: "bitfun-cli",
           nConcurrent: concurrency,
@@ -1623,7 +1699,11 @@ INDEX_HTML = """<!doctype html>
       });
       state.createResult = result;
       renderCreateResult();
-      await loadDashboard();
+      if (result.syncJobId && result.run?.run_id) {
+        startSyncPolling(result.run.run_id);
+      } else {
+        await loadDashboard();
+      }
     }
 
     document.querySelectorAll(".tab").forEach(btn => {

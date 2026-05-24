@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from agent_eval_orchestrator.storage.store import Store
 
+from agent_eval_orchestrator.controller.ssh_runner import SshRunner
+
 DEFAULT_TUNNEL_REMOTE_PORT = 17380
 DEFAULT_UV_BIN = "/home/djn/.local/bin/uv"
 DEFAULT_AEO_DIR = "/home/djn/worker/agent-eval-orchestrator"
@@ -185,6 +187,7 @@ class Provisioner:
         self._threads: dict[str, threading.Thread] = {}
         self._cancelled: set[str] = set()
         self._current_job_id = ""
+        self.ssh = SshRunner(self.ssh_config_path, log_fn=self._log)
 
     def initial_steps(self, mode: str, *, connection_mode: str = "direct") -> list[dict[str, str]]:
         return initial_steps_for_mode(mode, connection_mode=connection_mode)
@@ -212,7 +215,7 @@ class Provisioner:
                 warnings.append(f"failed to kill tunnel: {exc}")
         remote_cmd = f"pkill -f 'worker.daemon.*--worker-id {worker_id}' || true"
         try:
-            result = self._ssh_run(
+            result = self.ssh.ssh_run(
                 ssh_host_alias,
                 remote_cmd,
                 check=False,
@@ -349,30 +352,6 @@ class Provisioner:
     def _log(self, chunk: str) -> None:
         self.store.append_provision_log(self._current_job_id, redact_sensitive_log(chunk))
 
-    def _ssh_base(self) -> list[str]:
-        return ["ssh", "-F", str(self.ssh_config_path), "-o", "BatchMode=yes"]
-
-    def _ssh_run(
-        self,
-        host_alias: str,
-        remote_command: str,
-        *,
-        check: bool = True,
-        connect_timeout_sec: int | None = None,
-        detach: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        cmd = [*self._ssh_base()]
-        if detach:
-            cmd.append("-n")
-        if connect_timeout_sec is not None:
-            cmd.extend(["-o", f"ConnectTimeout={connect_timeout_sec}"])
-        cmd.extend([host_alias, remote_command])
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        self._log(result.stdout + result.stderr)
-        if check and result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "ssh command failed")
-        return result
-
     def _validate_ssh(
         self,
         mode: str,
@@ -392,23 +371,15 @@ class Provisioner:
                 raise RuntimeError(root_message)
 
     def _bootstrap(self, bootstrap_alias: str, djn_password: str) -> None:
-        scp_cmd = [
-            "scp",
-            "-F",
-            str(self.ssh_config_path),
-            "-o",
-            "BatchMode=yes",
-            str(self.bootstrap_script_path),
+        self.ssh.scp_file(
+            self.bootstrap_script_path,
             f"{bootstrap_alias}:/tmp/aeo-bootstrap.sh",
-        ]
-        result = subprocess.run(scp_cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "scp bootstrap script failed")
+        )
         remote = build_bootstrap_command(djn_password=djn_password)
-        self._ssh_run(bootstrap_alias, remote)
+        self.ssh.ssh_run(bootstrap_alias, remote)
 
     def _verify_layout(self, ssh_host_alias: str) -> None:
-        result = self._ssh_run(ssh_host_alias, build_verify_layout_command())
+        result = self.ssh.ssh_run(ssh_host_alias, build_verify_layout_command())
         if "uv" not in (result.stdout or "").lower():
             raise RuntimeError(
                 "Worker layout verification failed. Missing harbor/agent-eval-orchestrator or uv. "
@@ -422,7 +393,7 @@ class Provisioner:
         tunnel_remote_port: int,
     ) -> None:
         cmd = [
-            *self._ssh_base(),
+            *self.ssh.ssh_base(),
             "-o",
             "ExitOnForwardFailure=yes",
             "-o",
@@ -479,7 +450,7 @@ class Provisioner:
             controller_url=controller_url,
             auth_token=self.auth_token,
         )
-        self._ssh_run(ssh_host_alias, remote, detach=True)
+        self.ssh.ssh_run(ssh_host_alias, remote, detach=True)
 
     def _wait_for_register(self, worker_id: str, *, timeout_sec: int = 90) -> None:
         deadline = time.time() + timeout_sec
