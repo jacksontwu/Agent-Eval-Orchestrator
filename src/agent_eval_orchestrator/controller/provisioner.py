@@ -54,7 +54,7 @@ def build_daemon_start_command(
     local_root = f"{DEFAULT_AEO_DIR}/runtime/workers/{worker_id}/local"
     log_path = f"{DEFAULT_WORKER_LOG_DIR}/daemon-{worker_id}.log"
     return (
-        f"mkdir -p {DEFAULT_WORKER_LOG_DIR} && "
+        f"( mkdir -p {DEFAULT_WORKER_LOG_DIR} && "
         f"cd {DEFAULT_AEO_DIR} && "
         f"setsid {DEFAULT_UV_BIN} run python -u -m agent_eval_orchestrator.worker.daemon "
         f'--controller-url "{controller_url}" '
@@ -66,7 +66,7 @@ def build_daemon_start_command(
         f"--slots {slots} "
         f"--poll-interval 3 "
         f'--auth-token "{auth_token}" '
-        f'>> "{log_path}" 2>&1 &'
+        f'>> "{log_path}" 2>&1 < /dev/null & )'
     )
 
 
@@ -359,8 +359,11 @@ class Provisioner:
         *,
         check: bool = True,
         connect_timeout_sec: int | None = None,
+        detach: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         cmd = [*self._ssh_base()]
+        if detach:
+            cmd.append("-n")
         if connect_timeout_sec is not None:
             cmd.extend(["-o", f"ConnectTimeout={connect_timeout_sec}"])
         cmd.extend([host_alias, remote_command])
@@ -469,17 +472,14 @@ class Provisioner:
         slots_total: int,
         controller_url: str,
     ) -> None:
-        remote = (
-            f"AEO_TOKEN={self.auth_token} "
-            + build_daemon_start_command(
-                worker_id=worker_id,
-                display_name=display_name,
-                slots=slots_total,
-                controller_url=controller_url,
-                auth_token=self.auth_token,
-            )
+        remote = build_daemon_start_command(
+            worker_id=worker_id,
+            display_name=display_name,
+            slots=slots_total,
+            controller_url=controller_url,
+            auth_token=self.auth_token,
         )
-        self._ssh_run(ssh_host_alias, remote)
+        self._ssh_run(ssh_host_alias, remote, detach=True)
 
     def _wait_for_register(self, worker_id: str, *, timeout_sec: int = 90) -> None:
         deadline = time.time() + timeout_sec
