@@ -758,15 +758,19 @@ INDEX_HTML = """<!doctype html>
       const list = document.getElementById("datasetRefSelect");
       const form = document.getElementById("createTaskForm");
       if (!list || !form) return;
+      const previous = String(form.elements.datasetRef.value || "").trim();
       list.innerHTML = (state.datasets || []).map(item =>
         '<option value="' + esc(item.path) + '">' + esc(item.label) + '</option>'
       ).join("");
-      const current = String(form.elements.datasetRef.value || "").trim();
-      if (!current) {
-        const preferred = preferredDatasetRef();
-        if (preferred) {
-          form.elements.datasetRef.value = preferred;
-        }
+      const available = new Set((state.datasets || []).map(item => String(item.path || "")));
+      const restored = previous && available.has(previous) ? previous : "";
+      if (restored) {
+        form.elements.datasetRef.value = restored;
+        return;
+      }
+      const preferred = preferredDatasetRef();
+      if (preferred) {
+        form.elements.datasetRef.value = preferred;
       }
     }
 
