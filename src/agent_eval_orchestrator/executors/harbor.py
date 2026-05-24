@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import shutil
 import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 
 from agent_eval_orchestrator.core.defaults import DEFAULT_HARBOR_REPO
+from agent_eval_orchestrator.core.worker_paths import resolve_harbor_repo, resolve_uv_binary
 from agent_eval_orchestrator.executors.base import CollectedArtifacts, Executor, PreparedBatch
 
 
@@ -31,6 +32,16 @@ class HarborExecutor(Executor):
                 return mapping[worker_id]
         return executor_config.get(key, default)
 
+    @staticmethod
+    def _worker_mapping_value(executor_config: dict[str, Any], worker_id: str | None, key: str) -> str | None:
+        if not worker_id:
+            return None
+        mapping = executor_config.get(f"{key}ByWorker")
+        if not isinstance(mapping, dict) or worker_id not in mapping:
+            return None
+        value = str(mapping[worker_id] or "").strip()
+        return value or None
+
     def prepare(
         self,
         *,
@@ -40,15 +51,17 @@ class HarborExecutor(Executor):
         dataset_ref: str,
         executor_config: dict[str, Any],
         local_root: Path,
+        shared_root: Path | None = None,
     ) -> PreparedBatch:
         batch_root = Path(str(batch["batch_root"])).resolve()
         batch_root.mkdir(parents=True, exist_ok=True)
         worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip() or None
-        harbor_root = Path(
-            str(self._resolve_worker_override(executor_config, worker_id, "harborRepoPath", DEFAULT_HARBOR_REPO))
-        ).resolve()
-        if not harbor_root.exists():
-            raise RuntimeError(f"harbor repo not found: {harbor_root}")
+        harbor_root = resolve_harbor_repo(
+            explicit=str(executor_config.get("harborRepoPath") or "").strip() or None,
+            shared_root=shared_root,
+            configured=self._worker_mapping_value(executor_config, worker_id, "harborRepoPath"),
+            default=DEFAULT_HARBOR_REPO,
+        )
 
         dataset_path = Path(
             str(self._resolve_worker_override(executor_config, worker_id, "datasetPath", dataset_ref))
@@ -71,7 +84,11 @@ class HarborExecutor(Executor):
         job_dir = jobs_dir / job_name
         worker_log_path = batch_root / "worker.log"
 
-        uv_binary = str(self._resolve_worker_override(executor_config, worker_id, "uvBinary", "uv"))
+        uv_binary = resolve_uv_binary(
+            explicit=str(executor_config.get("uvBinary") or "").strip() or None,
+            configured=self._worker_mapping_value(executor_config, worker_id, "uvBinary"),
+            shared_root=shared_root,
+        )
         harbor_args = [
             "run",
             "harbor",
@@ -132,10 +149,13 @@ class HarborExecutor(Executor):
             "/bin/bash",
             "-lc",
             (
-                f"if ! command -v {quoted_uv} >/dev/null 2>&1 && [ ! -x {quoted_uv} ]; then "
+                f'UV={quoted_uv}; '
+                f'if ! command -v "$UV" >/dev/null 2>&1 && [ ! -x "$UV" ]; then '
                 "curl -LsSf https://astral.sh/uv/install.sh | sh; "
+                'UV="$(command -v uv || true)"; '
                 "fi; "
-                f"exec {quoted_uv} {quoted_args}"
+                'if [ -z "$UV" ]; then echo "uv not found after install" >&2; exit 127; fi; '
+                f'exec "$UV" {quoted_args}'
             ),
         ]
 
@@ -154,6 +174,7 @@ class HarborExecutor(Executor):
             "datasetPath": str(effective_dataset_path),
             "selectedCaseIds": selected_case_ids,
             "command": command,
+            "uvBinary": uv_binary,
             "collectJobs": bool(executor_config.get("collectJobs")),
             "combinedJobsDir": str(executor_config.get("combinedJobsDir") or ""),
         }

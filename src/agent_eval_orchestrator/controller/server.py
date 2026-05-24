@@ -262,15 +262,20 @@ def _job_sources_for_run(
     return list(grouped_sources.items())
 
 
-def _worker_repo_root(worker: dict[str, object] | None) -> Path | None:
+def _worker_shared_root(worker: dict[str, object] | None) -> str:
     if not worker:
-        return None
+        return ""
     capabilities = worker.get("capabilities") if isinstance(worker.get("capabilities"), dict) else {}
-    shared_root = str(capabilities.get("sharedRoot") or "").strip()
+    return str(capabilities.get("sharedRoot") or "").strip()
+
+
+def _worker_repo_root(worker: dict[str, object] | None) -> Path | None:
+    shared_root = _worker_shared_root(worker)
     if not shared_root:
         return None
-    shared_path = Path(shared_root).expanduser()
-    return shared_path.parent if shared_path.name == "runtime" else shared_path
+    from agent_eval_orchestrator.core.worker_paths import repo_root_from_shared_root
+
+    return repo_root_from_shared_root(shared_root)
 
 
 def _map_dataset_for_worker(dataset_ref: str, worker: dict[str, object] | None) -> str:
@@ -283,21 +288,28 @@ def _map_dataset_for_worker(dataset_ref: str, worker: dict[str, object] | None) 
 
 
 def _default_harbor_for_worker(worker_id: str, worker: dict[str, object] | None) -> str:
-    worker_root = _worker_repo_root(worker)
-    if worker_root:
-        return str(worker_root.parent / "harbor")
+    from agent_eval_orchestrator.core.worker_paths import default_harbor_repo_from_shared_root
+
+    shared_root = _worker_shared_root(worker)
+    if shared_root:
+        harbor_path = default_harbor_repo_from_shared_root(shared_root)
+        if harbor_path:
+            return str(harbor_path)
     if worker_id == "remote-a":
         return "/home/wt/harbor"
     return str(DEFAULT_HARBOR_REPO)
 
 
 def _default_uv_for_worker(worker_id: str, worker: dict[str, object] | None) -> str:
-    worker_root = _worker_repo_root(worker)
+    from agent_eval_orchestrator.core.worker_paths import default_uv_binary_from_shared_root
+
     if worker_id == "local-a":
         return "/root/.local/bin/uv"
-    if worker_root:
-        home = worker_root.parent
-        return str(home / ".local" / "bin" / "uv")
+    shared_root = _worker_shared_root(worker)
+    if shared_root:
+        uv_path = default_uv_binary_from_shared_root(shared_root)
+        if uv_path:
+            return str(uv_path)
     if worker_id == "remote-a":
         return "/home/wt/.local/bin/uv"
     return "/root/.local/bin/uv"

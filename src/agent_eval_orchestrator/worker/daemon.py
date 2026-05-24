@@ -278,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_ref=str(task["datasetRef"]),
                 executor_config=dict(task["executorConfig"]),
                 local_root=batch_local_root,
+                shared_root=shared_root,
             )
             log_file = prepared.worker_log_path.open("a", encoding="utf-8")
             env = os.environ.copy()

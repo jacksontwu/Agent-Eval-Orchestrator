@@ -41,6 +41,7 @@ class Executor(ABC):
         dataset_ref: str,
         executor_config: dict[str, Any],
         local_root: Path,
+        shared_root: Path | None = None,
     ) -> PreparedBatch:
         raise NotImplementedError
 
