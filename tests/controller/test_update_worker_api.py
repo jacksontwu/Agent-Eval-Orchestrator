@@ -138,3 +138,40 @@ def test_update_worker_starts_job(store, sample_ssh_config):
     assert body["jobId"].startswith("upd-")
     mock_start.assert_called_once()
     server.shutdown()
+
+
+def test_update_worker_allows_stale_running_provision_job_when_ready(store, sample_ssh_config):
+    _seed_worker(store)
+    job_id = new_id("prov")
+    store.create_provision_job(
+        job_id=job_id,
+        worker_id="ecs-worker-upd",
+        mode="join",
+        steps=[{"id": "start_daemon", "label": "启动", "status": "running"}],
+    )
+    store.update_provision_job(job_id, status="running", current_step="start_daemon")
+    server = start_test_server(store, sample_ssh_config, 9885)
+    with patch.object(WorkerUpdater, "start_job_async") as mock_start:
+        status, body = post_update(9885, "ecs-worker-upd", {"targets": ["harbor"]})
+    assert status == 202
+    assert body["targets"] == ["harbor"]
+    mock_start.assert_called_once()
+    server.shutdown()
+
+
+def test_update_worker_blocks_active_provisioning(store, sample_ssh_config):
+    _seed_worker(store)
+    store.set_worker_provision_status("ecs-worker-upd", provision_status="provisioning")
+    job_id = new_id("prov")
+    store.create_provision_job(
+        job_id=job_id,
+        worker_id="ecs-worker-upd",
+        mode="join",
+        steps=[{"id": "validate_ssh", "label": "校验", "status": "running"}],
+    )
+    store.update_provision_job(job_id, status="running", current_step="validate_ssh")
+    server = start_test_server(store, sample_ssh_config, 9886)
+    status, body = post_update(9886, "ecs-worker-upd")
+    assert status == 409
+    assert body == {"error": "provision in progress"}
+    server.shutdown()

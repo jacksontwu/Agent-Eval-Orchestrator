@@ -1284,8 +1284,13 @@ class Handler(BaseHTTPRequestHandler):
             if self.store.get_active_worker_update_job_for_worker(worker_id):
                 _json_response(self, {"error": "update already in progress"}, 409)
                 return
+            provision_status = str(worker.get("provision_status") or "none")
             latest_prov = self.store.get_latest_provision_job_for_worker(worker_id)
-            if latest_prov and str(latest_prov["status"]) in {"pending", "running"}:
+            if provision_status == "provisioning" or (
+                latest_prov
+                and str(latest_prov["status"]) in {"pending", "running"}
+                and provision_status not in {"ready", "failed", "none"}
+            ):
                 _json_response(self, {"error": "provision in progress"}, 409)
                 return
             raw_targets = body.get("targets")

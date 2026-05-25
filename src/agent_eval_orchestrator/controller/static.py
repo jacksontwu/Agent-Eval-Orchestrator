@@ -1562,16 +1562,34 @@ INDEX_HTML = """<!doctype html>
         alert("请至少选择一个仓库");
         return;
       }
-      const workerId = state.updateJob.workerId;
-      const result = await api("/api/workers/" + encodeURIComponent(workerId) + "/update", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ targets }),
-      });
-      state.updateJob = { jobId: result.jobId, workerId: result.workerId };
-      state.updateWorkerPhase = "progress";
-      await renderUpdateWorkerModal();
-      startUpdatePolling();
+      const workerId = state.updateJob?.workerId;
+      if (!workerId) {
+        showToast("更新失败：未找到 worker");
+        return;
+      }
+      const submitBtn = event.target.querySelector('button[type="submit"]');
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = "提交中…";
+      }
+      try {
+        const result = await api("/api/workers/" + encodeURIComponent(workerId) + "/update", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ targets }),
+        });
+        state.updateJob = { jobId: result.jobId, workerId: result.workerId };
+        state.updateWorkerPhase = "progress";
+        await renderUpdateWorkerModal();
+        startUpdatePolling();
+      } catch (error) {
+        showToast("更新失败：" + formatApiError(error));
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = "开始更新";
+        }
+      }
     }
 
     async function pollUpdateJob() {
