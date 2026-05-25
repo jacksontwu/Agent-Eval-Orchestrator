@@ -6,6 +6,8 @@ import subprocess
 import time
 from urllib import request
 
+from agent_eval_orchestrator.normalizers.harbor_timestamps import normalize_jobs_dir
+
 
 @dataclass
 class ViewerSession:
@@ -48,6 +50,7 @@ class HarborViewerManager:
             return existing
         if not jobs_dir.exists():
             raise RuntimeError(f"jobs dir not found: {jobs_dir}")
+        normalize_jobs_dir(jobs_dir)
         port = self._pick_port()
         log_path = self.logs_dir / f"harbor-viewer-{viewer_id}.log"
         command = (

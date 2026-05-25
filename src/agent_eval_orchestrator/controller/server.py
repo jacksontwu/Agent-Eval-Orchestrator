@@ -38,6 +38,13 @@ from agent_eval_orchestrator.controller.asset_syncer import (
     validate_create_task_assets,
 )
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
+from agent_eval_orchestrator.normalizers.harbor_timestamps import (
+    normalize_job_result_payload,
+    normalize_jobs_dir,
+    normalize_timestamp_value,
+    parse_harbor_timestamp,
+    to_harbor_naive_utc_iso,
+)
 from agent_eval_orchestrator.controller.provisioner import Provisioner
 from agent_eval_orchestrator.controller.worker_updater import WorkerUpdater
 from agent_eval_orchestrator.controller.ssh_config import list_ssh_hosts, test_ssh_alias
@@ -198,29 +205,45 @@ def _write_merged_job(
                 metric_entries.append({"mean": fsum(values) / len(values)})
         eval_stats["metrics"] = metric_entries
 
-    started_values = [str(trial.get("started_at")) for trial in trial_payloads if trial.get("started_at")]
-    finished_values = [str(trial.get("finished_at")) for trial in trial_payloads if trial.get("finished_at")]
+    started_values = [
+        parse_harbor_timestamp(str(trial["started_at"]))
+        for trial in trial_payloads
+        if trial.get("started_at")
+    ]
+    finished_values = [
+        parse_harbor_timestamp(str(trial["finished_at"]))
+        for trial in trial_payloads
+        if trial.get("finished_at")
+    ]
     updated_values = finished_values or started_values
-    job_result = {
-        "id": str(uuid4()),
-        "started_at": min(started_values) if started_values else now_iso(),
-        "updated_at": max(updated_values) if updated_values else now_iso(),
-        "finished_at": max(finished_values) if len(finished_values) == len(trial_payloads) else None,
-        "n_total_trials": len(trial_payloads),
-        "stats": {
-            "n_completed_trials": len(trial_payloads),
-            "n_errored_trials": n_errored_trials,
-            "n_running_trials": 0,
-            "n_pending_trials": 0,
-            "n_cancelled_trials": n_cancelled_trials,
-            "n_retries": 0,
-            "evals": evals,
-            "n_input_tokens": n_input_tokens,
-            "n_cache_tokens": n_cache_tokens,
-            "n_output_tokens": n_output_tokens,
-            "cost_usd": cost_usd,
-        },
-    }
+    job_result = normalize_job_result_payload(
+        {
+            "id": str(uuid4()),
+            "started_at": to_harbor_naive_utc_iso(min(started_values))
+            if started_values
+            else normalize_timestamp_value(now_iso()),
+            "updated_at": to_harbor_naive_utc_iso(max(updated_values))
+            if updated_values
+            else normalize_timestamp_value(now_iso()),
+            "finished_at": to_harbor_naive_utc_iso(max(finished_values))
+            if len(finished_values) == len(trial_payloads)
+            else None,
+            "n_total_trials": len(trial_payloads),
+            "stats": {
+                "n_completed_trials": len(trial_payloads),
+                "n_errored_trials": n_errored_trials,
+                "n_running_trials": 0,
+                "n_pending_trials": 0,
+                "n_cancelled_trials": n_cancelled_trials,
+                "n_retries": 0,
+                "evals": evals,
+                "n_input_tokens": n_input_tokens,
+                "n_cache_tokens": n_cache_tokens,
+                "n_output_tokens": n_output_tokens,
+                "cost_usd": cost_usd,
+            },
+        }
+    )
     (merged_job_dir / "result.json").write_text(
         json.dumps(job_result, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -540,6 +563,7 @@ class Handler(BaseHTTPRequestHandler):
         jobs_dir = DEFAULT_JOBS_DIR
         jobs_dir.mkdir(parents=True, exist_ok=True)
         self._rebuild_merged_jobs(jobs_dir)
+        normalize_jobs_dir(jobs_dir)
         try:
             with request.urlopen(f"http://127.0.0.1:{GLOBAL_VIEWER_PORT}/api/health", timeout=1):
                 return {
