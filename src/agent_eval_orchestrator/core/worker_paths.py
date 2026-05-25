@@ -106,6 +106,20 @@ def build_harbor_bind_mounts(*, uv_binary: str, harbor_repo: str, bitfun_config_
     ]
 
 
+def build_sync_bind_mounts(*, uv_binary: str, sync_root: str) -> list[dict[str, Any]]:
+    root = str(Path(sync_root).expanduser())
+    return [
+        {"type": "bind", "source": uv_binary, "target": "/usr/local/bin/uv", "read_only": True},
+        {
+            "type": "bind",
+            "source": f"{root}/bitfun/bitfun-cli",
+            "target": "/usr/local/bin/bitfun-cli",
+            "read_only": True,
+        },
+        {"type": "bind", "source": f"{root}/bitfun/config", "target": "/root/.config/bitfun"},
+    ]
+
+
 def resolve_harbor_repo(
     *,
     explicit: str | None = None,

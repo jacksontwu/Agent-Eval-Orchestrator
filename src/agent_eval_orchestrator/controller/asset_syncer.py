@@ -7,10 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from agent_eval_orchestrator.controller.ssh_runner import SshRunner
-from agent_eval_orchestrator.core.worker_paths import (
-    build_harbor_bind_mounts,
-    default_bitfun_config_dir,
-)
+from agent_eval_orchestrator.core.worker_paths import build_sync_bind_mounts
 
 if TYPE_CHECKING:
     from agent_eval_orchestrator.storage.store import Store
@@ -137,23 +134,11 @@ def build_sync_manifest(
     }
 
 
-def worker_executor_paths(
-    *,
-    target_root: str,
-    worker_id: str,
-    shared_root: str,
-    harbor_repo: str,
-    uv_binary: str,
-) -> dict[str, Any]:
+def worker_executor_paths(*, target_root: str, uv_binary: str) -> dict[str, Any]:
     root = str(Path(target_root))
-    bitfun_config = default_bitfun_config_dir(worker_id=worker_id, shared_root=shared_root or None)
     return {
         "datasetPath": f"{root}/dataset",
-        "mounts": build_harbor_bind_mounts(
-            uv_binary=uv_binary,
-            harbor_repo=harbor_repo,
-            bitfun_config_dir=bitfun_config,
-        ),
+        "mounts": build_sync_bind_mounts(uv_binary=uv_binary, sync_root=root),
     }
 
 
@@ -262,14 +247,10 @@ class AssetSyncer:
         lock = threading.Lock()
         template = self.store.get_task_template(template_id)
         executor_config = dict(template.get("executor_config") or {}) if template else {}
-        workers_by_id = {str(worker["worker_id"]): worker for worker in self.store.list_workers()}
 
         def worker_thread(worker_id: str) -> None:
             nonlocal steps
             entry = worker_entries[worker_id]
-            worker = workers_by_id.get(worker_id) or {}
-            shared_root = str((worker.get("capabilities") or {}).get("sharedRoot") or "")
-            harbor_repo = str((executor_config.get("harborRepoPathByWorker") or {}).get(worker_id) or "")
             uv_binary = str((executor_config.get("uvBinaryByWorker") or {}).get(worker_id) or "")
             try:
                 with lock:
@@ -286,9 +267,6 @@ class AssetSyncer:
                     self.store.update_asset_sync_job(job_id, steps=steps)
                 paths = worker_executor_paths(
                     target_root=str(entry["targetRoot"]),
-                    worker_id=worker_id,
-                    shared_root=shared_root,
-                    harbor_repo=harbor_repo,
                     uv_binary=uv_binary,
                 )
                 self.store.update_task_template_executor_config(

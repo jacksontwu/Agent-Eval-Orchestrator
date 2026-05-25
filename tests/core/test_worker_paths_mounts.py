@@ -1,4 +1,8 @@
-from agent_eval_orchestrator.core.worker_paths import build_harbor_bind_mounts, default_bitfun_config_dir
+from agent_eval_orchestrator.core.worker_paths import (
+    build_harbor_bind_mounts,
+    build_sync_bind_mounts,
+    default_bitfun_config_dir,
+)
 
 
 def test_default_bitfun_config_dir_for_worker_layout():
@@ -6,6 +10,27 @@ def test_default_bitfun_config_dir_for_worker_layout():
         worker_id="ecs-worker-0001",
         shared_root="/home/djn/worker/agent-eval-orchestrator/runtime",
     ) == "/home/djn/.config/bitfun"
+
+
+def test_build_sync_bind_mounts():
+    mounts = build_sync_bind_mounts(
+        uv_binary="/home/djn/.local/bin/uv",
+        sync_root="/home/djn/worker/agent-eval-orchestrator/runtime/sync/run-abc",
+    )
+    assert mounts == [
+        {"type": "bind", "source": "/home/djn/.local/bin/uv", "target": "/usr/local/bin/uv", "read_only": True},
+        {
+            "type": "bind",
+            "source": "/home/djn/worker/agent-eval-orchestrator/runtime/sync/run-abc/bitfun/bitfun-cli",
+            "target": "/usr/local/bin/bitfun-cli",
+            "read_only": True,
+        },
+        {
+            "type": "bind",
+            "source": "/home/djn/worker/agent-eval-orchestrator/runtime/sync/run-abc/bitfun/config",
+            "target": "/root/.config/bitfun",
+        },
+    ]
 
 
 def test_build_harbor_bind_mounts():

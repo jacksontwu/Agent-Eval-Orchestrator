@@ -114,14 +114,13 @@ def test_build_sync_manifest(tmp_path):
 def test_worker_executor_paths():
     paths = worker_executor_paths(
         target_root="/tmp/sync/run-1",
-        worker_id="ecs-worker-0001",
-        shared_root="/home/djn/worker/agent-eval-orchestrator/runtime",
-        harbor_repo="/home/djn/worker/harbor",
         uv_binary="/home/djn/.local/bin/uv",
     )
     assert paths["datasetPath"] == "/tmp/sync/run-1/dataset"
     assert paths["mounts"][0]["target"] == "/usr/local/bin/uv"
+    assert paths["mounts"][1]["source"] == "/tmp/sync/run-1/bitfun/bitfun-cli"
     assert paths["mounts"][1]["target"] == "/usr/local/bin/bitfun-cli"
+    assert paths["mounts"][2]["source"] == "/tmp/sync/run-1/bitfun/config"
     assert paths["mounts"][2]["target"] == "/root/.config/bitfun"
 
 
@@ -247,6 +246,9 @@ def test_asset_syncer_promotes_batches_on_success(store, tmp_path, sample_ssh_co
     assert claimed is not None
     updated_template = store.get_task_template(template["template_id"])
     assert updated_template["executor_config"]["datasetPathByWorker"]["local-a"].endswith("/dataset")
+    mounts = updated_template["executor_config"]["mountsByWorker"]["local-a"]
+    assert mounts[1]["source"].endswith("/bitfun/bitfun-cli")
+    assert mounts[2]["source"].endswith("/bitfun/config")
 
 
 def test_cleanup_run_sync_assets_local(store, tmp_path, sample_ssh_config):
