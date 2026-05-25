@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from typing import Any
 
 
 def repo_root_from_shared_root(shared_root: Path | str) -> Path | None:
@@ -77,6 +78,32 @@ def resolve_uv_binary(
     if configured and configured not in ("", "uv"):
         return configured
     return "uv"
+
+
+def default_bitfun_config_dir(*, worker_id: str, shared_root: Path | str | None) -> str:
+    if worker_id == "local-a":
+        return "/root/.config/bitfun"
+    if worker_id == "remote-a":
+        return "/home/wt/.config/bitfun"
+    if shared_root:
+        home = user_home_from_shared_root(shared_root)
+        if home:
+            return str(home / ".config" / "bitfun")
+    return "/root/.config/bitfun"
+
+
+def build_harbor_bind_mounts(*, uv_binary: str, harbor_repo: str, bitfun_config_dir: str) -> list[dict[str, Any]]:
+    harbor_root = str(Path(harbor_repo).expanduser())
+    return [
+        {"type": "bind", "source": uv_binary, "target": "/usr/local/bin/uv", "read_only": True},
+        {
+            "type": "bind",
+            "source": f"{harbor_root}/BitFun/target/release/bitfun-cli",
+            "target": "/usr/local/bin/bitfun-cli",
+            "read_only": True,
+        },
+        {"type": "bind", "source": bitfun_config_dir, "target": "/root/.config/bitfun"},
+    ]
 
 
 def resolve_harbor_repo(

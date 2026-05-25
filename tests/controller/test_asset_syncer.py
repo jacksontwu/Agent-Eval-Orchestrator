@@ -112,10 +112,17 @@ def test_build_sync_manifest(tmp_path):
 
 
 def test_worker_executor_paths():
-    paths = worker_executor_paths("/tmp/sync/run-1")
+    paths = worker_executor_paths(
+        target_root="/tmp/sync/run-1",
+        worker_id="ecs-worker-0001",
+        shared_root="/home/djn/worker/agent-eval-orchestrator/runtime",
+        harbor_repo="/home/djn/worker/harbor",
+        uv_binary="/home/djn/.local/bin/uv",
+    )
     assert paths["datasetPath"] == "/tmp/sync/run-1/dataset"
-    assert paths["mounts"][0]["target"] == "/usr/local/bin/bitfun-cli"
-    assert paths["agentEnv"]["XDG_CONFIG_HOME"] == "/testbed/.config"
+    assert paths["mounts"][0]["target"] == "/usr/local/bin/uv"
+    assert paths["mounts"][1]["target"] == "/usr/local/bin/bitfun-cli"
+    assert paths["mounts"][2]["target"] == "/root/.config/bitfun"
 
 
 def test_initial_worker_steps_and_status():

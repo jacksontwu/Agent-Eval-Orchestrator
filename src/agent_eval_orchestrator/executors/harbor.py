@@ -137,6 +137,17 @@ class HarborExecutor(Executor):
             harbor_args.extend(
                 ["--environment-build-timeout-multiplier", str(environment_build_timeout_multiplier)]
             )
+        max_retries = executor_config.get("maxRetries")
+        if max_retries is not None:
+            harbor_args.extend(["--max-retries", str(max_retries)])
+        if executor_config.get("environmentForceBuild") is True:
+            harbor_args.append("--force-build")
+        elif executor_config.get("environmentForceBuild") is False:
+            harbor_args.append("--no-force-build")
+        if executor_config.get("environmentDelete") is True:
+            harbor_args.append("--delete")
+        elif executor_config.get("environmentDelete") is False:
+            harbor_args.append("--no-delete")
         mounts = self._resolve_worker_override(executor_config, worker_id, "mounts", None)
         if mounts:
             harbor_args.extend(["--mounts", json.dumps(mounts, ensure_ascii=False)])

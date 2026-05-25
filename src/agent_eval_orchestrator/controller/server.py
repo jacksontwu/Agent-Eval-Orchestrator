@@ -22,14 +22,18 @@ from urllib.parse import parse_qs, urlparse
 from agent_eval_orchestrator.core.defaults import (
     DEFAULT_AGENT_TIMEOUT_MULTIPLIER,
     DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER,
+    DEFAULT_ENVIRONMENT_DELETE,
+    DEFAULT_ENVIRONMENT_FORCE_BUILD,
     DEFAULT_HARBOR_REPO,
     DEFAULT_HOST,
+    DEFAULT_MAX_RETRIES,
     DEFAULT_PER_WORKER_CONCURRENCY,
     DEFAULT_PORT,
     DEFAULT_PRESET_DATASETS,
     DEFAULT_TIMEOUT_MULTIPLIER,
     DEFAULT_VERIFIER_TIMEOUT_MULTIPLIER,
 )
+from agent_eval_orchestrator.core.worker_paths import build_harbor_bind_mounts, default_bitfun_config_dir
 from agent_eval_orchestrator.core.ids import new_id, now_iso, sanitize_name
 from agent_eval_orchestrator.controller.asset_syncer import (
     AssetSyncer,
@@ -340,26 +344,16 @@ def _default_uv_for_worker(worker_id: str, worker: dict[str, object] | None) -> 
     return "/root/.local/bin/uv"
 
 
-def _default_bitfun_mounts(worker_id: str, worker: dict[str, object] | None) -> list[dict[str, str]]:
-    worker_root = _worker_repo_root(worker)
-    if worker_root:
-        home = worker_root.parent
-        if worker_id == "local-a" or str(home) == "/root":
-            bitfun_bin = "/root/projects/BitFun/target/release/bitfun-cli"
-            bitfun_config = "/root/.config/bitfun"
-        else:
-            bitfun_bin = str(home / "bitfun-cli")
-            bitfun_config = str(home / ".config" / "bitfun")
-    elif worker_id == "remote-a":
-        bitfun_bin = "/home/wt/bitfun-cli"
-        bitfun_config = "/home/wt/.config/bitfun"
-    else:
-        bitfun_bin = "/root/projects/BitFun/target/release/bitfun-cli"
-        bitfun_config = "/root/.config/bitfun"
-    return [
-        {"type": "bind", "source": bitfun_bin, "target": "/usr/local/bin/bitfun-cli"},
-        {"type": "bind", "source": bitfun_config, "target": "/testbed/.config/bitfun"},
-    ]
+def _default_bitfun_mounts(worker_id: str, worker: dict[str, object] | None) -> list[dict[str, object]]:
+    shared_root = _worker_shared_root(worker)
+    harbor_repo = _default_harbor_for_worker(worker_id, worker)
+    uv_binary = _default_uv_for_worker(worker_id, worker)
+    bitfun_config = default_bitfun_config_dir(worker_id=worker_id, shared_root=shared_root or None)
+    return build_harbor_bind_mounts(
+        uv_binary=uv_binary,
+        harbor_repo=harbor_repo,
+        bitfun_config_dir=bitfun_config,
+    )
 
 
 def _build_executor_config(
@@ -374,15 +368,13 @@ def _build_executor_config(
     harbor_repo_by_worker: dict[str, str] = {}
     dataset_path_by_worker: dict[str, str] = {}
     uv_binary_by_worker: dict[str, str] = {}
-    mounts_by_worker: dict[str, list[dict[str, str]]] = {}
-    agent_env_by_worker: dict[str, dict[str, str]] = {}
+    mounts_by_worker: dict[str, list[dict[str, object]]] = {}
     for worker_id in worker_ids:
         worker = workers_by_id.get(worker_id)
         harbor_repo_by_worker[worker_id] = _default_harbor_for_worker(worker_id, worker)
         dataset_path_by_worker[worker_id] = _map_dataset_for_worker(dataset_ref, worker)
         uv_binary_by_worker[worker_id] = _default_uv_for_worker(worker_id, worker)
         mounts_by_worker[worker_id] = _default_bitfun_mounts(worker_id, worker)
-        agent_env_by_worker[worker_id] = {"XDG_CONFIG_HOME": "/testbed/.config"}
     n_concurrent = int(body_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
     timeout_multiplier = body_config.get("timeoutMultiplier")
     agent_timeout_multiplier = body_config.get("agentTimeoutMultiplier")
@@ -414,11 +406,21 @@ def _build_executor_config(
             if environment_build_timeout_multiplier not in (None, "")
             else DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER
         ),
+        "maxRetries": int(body_config.get("maxRetries") or DEFAULT_MAX_RETRIES),
+        "environmentForceBuild": (
+            bool(body_config["environmentForceBuild"])
+            if "environmentForceBuild" in body_config
+            else DEFAULT_ENVIRONMENT_FORCE_BUILD
+        ),
+        "environmentDelete": (
+            bool(body_config["environmentDelete"])
+            if "environmentDelete" in body_config
+            else DEFAULT_ENVIRONMENT_DELETE
+        ),
         "harborRepoPathByWorker": harbor_repo_by_worker,
         "datasetPathByWorker": dataset_path_by_worker,
         "uvBinaryByWorker": uv_binary_by_worker,
         "mountsByWorker": mounts_by_worker,
-        "agentEnvByWorker": agent_env_by_worker,
         "collectJobs": True,
         "combinedJobsDir": jobs_dir,
     }
@@ -451,7 +453,6 @@ def _build_asset_sync_executor_config(
         "useAssetSync": True,
         "datasetPathByWorker": {},
         "mountsByWorker": {},
-        "agentEnvByWorker": {},
         "harborRepoPathByWorker": harbor_repo_by_worker,
         "uvBinaryByWorker": uv_binary_by_worker,
     }
