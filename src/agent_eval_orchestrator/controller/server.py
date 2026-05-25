@@ -6,6 +6,7 @@ from http.cookies import SimpleCookie
 import io
 import ipaddress
 import json
+import os
 from math import fsum
 from pathlib import Path
 import shutil
@@ -1504,8 +1505,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--shared-root", default=None)
     parser.add_argument("--auth-token", default=None)
+    parser.add_argument("--github-token", default=None)
     parser.add_argument("--ssh-config", default="~/.ssh/config")
     args = parser.parse_args(argv)
+
+    github_token = str(args.github_token or os.environ.get("AEO_GITHUB_TOKEN") or "") or None
 
     layout = default_layout(args.shared_root)
     store = Store(layout)
@@ -1526,6 +1530,7 @@ def main(argv: list[str] | None = None) -> int:
         auth_token=str(args.auth_token or "") or "",
         controller_port=args.port,
         provisioner=provisioner,
+        github_token=github_token,
     )
     asset_syncer = AssetSyncer(
         store=store,

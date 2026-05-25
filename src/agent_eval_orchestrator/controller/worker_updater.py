@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -48,6 +49,19 @@ def initial_update_step_ids(targets: list[str]) -> list[str]:
     return ids
 
 
+def build_git_pull_command(repo_dir: str, github_token: str | None = None) -> str:
+    parts = [f"cd {repo_dir}", "GIT_TERMINAL_PROMPT=0"]
+    if github_token:
+        helper = '!f() { echo username=x-access-token; echo password="$AEO_GITHUB_TOKEN"; }; f'
+        parts.append(f"AEO_GITHUB_TOKEN={shlex.quote(github_token)}")
+        parts.append(
+            f"git -c credential.helper= -c credential.helper={shlex.quote(helper)} pull --ff-only"
+        )
+    else:
+        parts.append("git pull --ff-only")
+    return " && ".join(parts)
+
+
 class WorkerUpdater:
     def __init__(
         self,
@@ -57,12 +71,14 @@ class WorkerUpdater:
         auth_token: str,
         controller_port: int,
         provisioner: Provisioner,
+        github_token: str | None = None,
     ) -> None:
         self.store = store
         self.ssh_config_path = ssh_config_path.expanduser().resolve()
         self.auth_token = auth_token
         self.controller_port = controller_port
         self.provisioner = provisioner
+        self.github_token = github_token or None
         self.ssh = SshRunner(self.ssh_config_path, log_fn=self._log)
         self._threads: dict[str, threading.Thread] = {}
         self._cancelled: set[str] = set()
@@ -248,9 +264,22 @@ class WorkerUpdater:
             self._log("\n".join(str(item) for item in warnings) + "\n")
 
     def _git_pull(self, ssh_host_alias: str, repo_dir: str) -> None:
-        result = self.ssh.ssh_run(ssh_host_alias, f"cd {repo_dir} && git pull")
+        result = self.ssh.ssh_run(
+            ssh_host_alias,
+            build_git_pull_command(repo_dir, self.github_token),
+        )
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
+            if not self.github_token and (
+                "could not read Username" in detail
+                or "terminal prompts disabled" in detail
+                or "Authentication failed" in detail
+            ):
+                raise RuntimeError(
+                    f"git pull failed in {repo_dir}: {detail}. "
+                    "私有 GitHub 仓库需要凭证：请为 controller 设置 --github-token 或 "
+                    "AEO_GITHUB_TOKEN，或在 worker 上将 origin 改为 SSH 并配置 deploy key。"
+                )
             raise RuntimeError(f"git pull failed in {repo_dir}: {detail}")
 
     def _uv_sync(self, ssh_host_alias: str, aeo_dir: str, uv_bin: str) -> None:

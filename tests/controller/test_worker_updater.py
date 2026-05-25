@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_eval_orchestrator.controller.provisioner import Provisioner
-from agent_eval_orchestrator.controller.worker_updater import WorkerUpdater
+from agent_eval_orchestrator.controller.worker_updater import WorkerUpdater, build_git_pull_command
 from agent_eval_orchestrator.core.ids import new_id
 
 
@@ -88,6 +88,51 @@ def test_resolve_paths_from_shared_root(updater):
 def test_resolve_paths_missing_shared_root(updater):
     with pytest.raises(RuntimeError, match="sharedRoot"):
         updater.resolve_paths({"capabilities": {}})
+
+
+def test_build_git_pull_command_without_token():
+    cmd = build_git_pull_command("/home/djn/worker/harbor")
+    assert "GIT_TERMINAL_PROMPT=0" in cmd
+    assert "git pull --ff-only" in cmd
+    assert "AEO_GITHUB_TOKEN" not in cmd
+
+
+def test_build_git_pull_command_with_token():
+    cmd = build_git_pull_command("/home/djn/worker/agent-eval-orchestrator", github_token="ghp_secret")
+    assert "AEO_GITHUB_TOKEN=ghp_secret" in cmd
+    assert "credential.helper" in cmd
+    assert "pull --ff-only" in cmd
+
+
+def test_git_pull_uses_github_token(updater, monkeypatch):
+    updater.github_token = "ghp_secret"
+    captured: list[str] = []
+
+    def fake_ssh_run(alias, remote, **kwargs):
+        captured.append(remote)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(updater.ssh, "ssh_run", fake_ssh_run)
+    updater._git_pull("aeo-ecs-0004", "/home/djn/worker/agent-eval-orchestrator")
+    assert captured
+    assert "AEO_GITHUB_TOKEN=ghp_secret" in captured[0]
+
+
+def test_git_pull_auth_error_hint_without_token(updater, monkeypatch):
+    def fake_ssh_run(alias, remote, **kwargs):
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        return result
+
+    monkeypatch.setattr(updater.ssh, "ssh_run", fake_ssh_run)
+    with pytest.raises(RuntimeError, match="--github-token"):
+        updater._git_pull("aeo-ecs-0004", "/home/djn/worker/agent-eval-orchestrator")
 
 
 def _seed_updatable_worker(store):
