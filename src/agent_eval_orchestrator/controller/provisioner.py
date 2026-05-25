@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -65,10 +66,10 @@ def build_daemon_start_command(
     logs = log_dir or DEFAULT_WORKER_LOG_DIR
     local_root = f"{aeo}/runtime/workers/{worker_id}/local"
     log_path = f"{logs}/daemon-{worker_id}.log"
-    return (
-        f"( mkdir -p {logs} && "
+    inner = (
+        f"mkdir -p {logs} && "
         f"cd {aeo} && "
-        f"setsid {uv} run python -u -m agent_eval_orchestrator.worker.daemon "
+        f"exec {uv} run python -u -m agent_eval_orchestrator.worker.daemon "
         f'--controller-url "{controller_url}" '
         f'--worker-id "{worker_id}" '
         f'--display-name "{display_name}" '
@@ -78,8 +79,10 @@ def build_daemon_start_command(
         f"--slots {slots} "
         f"--poll-interval 3 "
         f'--auth-token "{auth_token}" '
-        f'>> "{log_path}" 2>&1 < /dev/null & )'
+        f'>> "{log_path}" 2>&1'
     )
+    # nohup + background bash keeps SSH from waiting on uv/python stdout handles.
+    return f"nohup bash -c {shlex.quote(inner)} </dev/null >>/dev/null 2>&1 &"
 
 
 STEP_LABELS = {

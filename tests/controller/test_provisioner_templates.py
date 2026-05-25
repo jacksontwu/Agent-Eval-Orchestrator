@@ -49,8 +49,9 @@ def test_build_daemon_start_command_detaches_from_ssh_session():
         controller_url="http://192.168.0.211:7380",
         auth_token="secret-token-value",
     )
-    assert cmd.startswith("( mkdir -p ")
-    assert "< /dev/null & )" in cmd
+    assert cmd.startswith("nohup bash -c ")
+    assert "exec " in cmd
+    assert ">>/dev/null 2>&1 &" in cmd
 
 
 def test_build_bootstrap_command():
