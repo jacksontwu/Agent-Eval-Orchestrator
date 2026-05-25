@@ -24,6 +24,7 @@ _RE_DJN_PASSWORD = re.compile(r"(DJN_PASSWORD=')([^']*)(')")
 _RE_AEO_TOKEN = re.compile(r"(AEO_TOKEN=)(\S+)")
 _RE_AUTH_TOKEN_FLAG = re.compile(r"(--auth-token\s+)(\S+)")
 _RE_GITHUB_TOKEN_ENV = re.compile(r"(AEO_GITHUB_TOKEN=)(\S+)")
+_RE_GITHUB_PASSWORD = re.compile(r"(password=)(['\"]?)(ghp_[A-Za-z0-9_]+)\2")
 
 
 def redact_sensitive_log(text: str) -> str:
@@ -31,6 +32,7 @@ def redact_sensitive_log(text: str) -> str:
     text = _RE_AEO_TOKEN.sub(r"\1***REDACTED***", text)
     text = _RE_AUTH_TOKEN_FLAG.sub(r"\1***REDACTED***", text)
     text = _RE_GITHUB_TOKEN_ENV.sub(r"\1***REDACTED***", text)
+    text = _RE_GITHUB_PASSWORD.sub(r"\1\2***REDACTED***\2", text)
     return text
 
 

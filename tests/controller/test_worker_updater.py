@@ -99,9 +99,11 @@ def test_build_git_pull_command_without_token():
 
 def test_build_git_pull_command_with_token():
     cmd = build_git_pull_command("/home/djn/worker/agent-eval-orchestrator", github_token="ghp_secret")
-    assert "AEO_GITHUB_TOKEN=ghp_secret" in cmd
+    assert "username=JinnanDuan" in cmd
+    assert "password='ghp_secret'" in cmd or "password=ghp_secret" in cmd
     assert "credential.helper" in cmd
     assert "pull --ff-only" in cmd
+    assert "AEO_GITHUB_TOKEN" not in cmd
 
 
 def test_git_pull_uses_github_token(updater, monkeypatch):
@@ -119,7 +121,8 @@ def test_git_pull_uses_github_token(updater, monkeypatch):
     monkeypatch.setattr(updater.ssh, "ssh_run", fake_ssh_run)
     updater._git_pull("aeo-ecs-0004", "/home/djn/worker/agent-eval-orchestrator")
     assert captured
-    assert "AEO_GITHUB_TOKEN=ghp_secret" in captured[0]
+    assert "password='ghp_secret'" in captured[0] or "password=ghp_secret" in captured[0]
+    assert "username=JinnanDuan" in captured[0]
 
 
 def test_git_pull_auth_error_hint_without_token(updater, monkeypatch):

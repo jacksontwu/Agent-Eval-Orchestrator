@@ -49,11 +49,17 @@ def initial_update_step_ids(targets: list[str]) -> list[str]:
     return ids
 
 
-def build_git_pull_command(repo_dir: str, github_token: str | None = None) -> str:
+def build_git_pull_command(
+    repo_dir: str,
+    github_token: str | None = None,
+    github_username: str = "JinnanDuan",
+) -> str:
     parts = [f"cd {repo_dir}", "GIT_TERMINAL_PROMPT=0"]
     if github_token:
-        helper = '!f() { echo username=x-access-token; echo password="$AEO_GITHUB_TOKEN"; }; f'
-        parts.append(f"AEO_GITHUB_TOKEN={shlex.quote(github_token)}")
+        helper = (
+            f"!f() {{ echo username={github_username}; "
+            f"echo password={shlex.quote(github_token)}; }}; f"
+        )
         parts.append(
             f"git -c credential.helper= -c credential.helper={shlex.quote(helper)} pull --ff-only"
         )
