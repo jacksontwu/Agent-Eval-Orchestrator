@@ -38,6 +38,7 @@ from agent_eval_orchestrator.controller.asset_syncer import (
 )
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
 from agent_eval_orchestrator.controller.provisioner import Provisioner
+from agent_eval_orchestrator.controller.worker_updater import WorkerUpdater
 from agent_eval_orchestrator.controller.ssh_config import list_ssh_hosts, test_ssh_alias
 from agent_eval_orchestrator.controller.static import INDEX_HTML
 from agent_eval_orchestrator.storage.layout import default_layout
@@ -491,6 +492,7 @@ class Handler(BaseHTTPRequestHandler):
     viewer_manager: HarborViewerManager | None = None
     global_viewer_process: subprocess.Popen | None = None
     provisioner: Provisioner | None = None
+    worker_updater: WorkerUpdater | None = None
     asset_syncer: AssetSyncer | None = None
     ssh_config_path: Path | None = None
     controller_shared_root: Path | None = None
@@ -720,6 +722,28 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "sshConfigPath": str(config_path),
                     "items": list_ssh_hosts(config_path),
+                },
+            )
+            return
+        if path.startswith("/api/workers/update/"):
+            job_id = path.split("/")[4]
+            job = self.store.get_worker_update_job(job_id)
+            if not job:
+                _json_response(self, {"error": "job not found"}, 404)
+                return
+            _json_response(
+                self,
+                {
+                    "jobId": job["job_id"],
+                    "workerId": job["worker_id"],
+                    "status": job["status"],
+                    "targets": job["targets"],
+                    "currentStep": job["current_step"],
+                    "steps": job["steps"],
+                    "logTail": job["log_tail"],
+                    "errorText": job["error_text"],
+                    "createdAt": job["created_at"],
+                    "finishedAt": job["finished_at"],
                 },
             )
             return
@@ -1206,6 +1230,107 @@ class Handler(BaseHTTPRequestHandler):
             )
             _json_response(self, {"ok": True, "jobId": job_id, "status": "cancelled"})
             return
+        if path.startswith("/api/workers/update/") and path.endswith("/cancel"):
+            job_id = path.split("/")[4]
+            job = self.store.get_worker_update_job(job_id)
+            if not job:
+                _json_response(self, {"error": "job not found"}, 404)
+                return
+            if self.worker_updater is None:
+                _json_response(self, {"error": "worker updater unavailable"}, 500)
+                return
+            worker = next(
+                (item for item in self.store.list_workers() if item["worker_id"] == job["worker_id"]),
+                None,
+            )
+            ssh_alias = str(worker.get("ssh_host_alias") or "") if worker else ""
+            connection_mode = str(worker.get("connection_mode") or "tunnel") if worker else "tunnel"
+            self.worker_updater.cancel_job(
+                job_id,
+                worker_id=str(job["worker_id"]),
+                ssh_host_alias=ssh_alias,
+                connection_mode=connection_mode,
+            )
+            _json_response(self, {"ok": True, "jobId": job_id, "status": "cancelled"})
+            return
+        if path.startswith("/api/workers/") and path.endswith("/update"):
+            worker_id = path.split("/")[3]
+            if self.worker_updater is None:
+                _json_response(self, {"error": "worker updater unavailable"}, 500)
+                return
+            worker = next(
+                (item for item in self.store.list_workers() if item["worker_id"] == worker_id),
+                None,
+            )
+            if not worker:
+                _json_response(self, {"error": "worker not found"}, 404)
+                return
+            ssh_alias = str(worker.get("ssh_host_alias") or "").strip()
+            if not ssh_alias:
+                _json_response(self, {"error": "ssh_host_alias required"}, 400)
+                return
+            counts = self.store.worker_has_active_batches(worker_id)
+            if counts["runningCount"] > 0 or counts["queuedCount"] > 0:
+                _json_response(
+                    self,
+                    {
+                        "error": "worker has active batches",
+                        "runningCount": counts["runningCount"],
+                        "queuedCount": counts["queuedCount"],
+                    },
+                    409,
+                )
+                return
+            if self.store.get_active_worker_update_job_for_worker(worker_id):
+                _json_response(self, {"error": "update already in progress"}, 409)
+                return
+            latest_prov = self.store.get_latest_provision_job_for_worker(worker_id)
+            if latest_prov and str(latest_prov["status"]) in {"pending", "running"}:
+                _json_response(self, {"error": "provision in progress"}, 409)
+                return
+            raw_targets = body.get("targets")
+            if raw_targets is None:
+                targets = ["aeo", "harbor"]
+            elif isinstance(raw_targets, list):
+                targets = [str(item) for item in raw_targets]
+            else:
+                _json_response(self, {"error": "targets must be an array"}, 400)
+                return
+            allowed = {"aeo", "harbor"}
+            if not targets or any(item not in allowed for item in targets):
+                _json_response(self, {"error": "targets must contain aeo and/or harbor"}, 400)
+                return
+            job_id = new_id("upd")
+            steps = self.worker_updater.initial_steps(targets)
+            self.store.create_worker_update_job(
+                job_id=job_id,
+                worker_id=worker_id,
+                targets=targets,
+                steps=steps,
+            )
+            self.worker_updater.start_job_async(
+                job_id=job_id,
+                worker_id=worker_id,
+                targets=targets,
+                ssh_host_alias=ssh_alias,
+                connection_mode=str(worker.get("connection_mode") or "direct"),
+                controller_internal_ip=worker.get("controller_internal_ip"),
+                tunnel_remote_port=worker.get("tunnel_remote_port"),
+                display_name=str(worker.get("display_name") or worker_id),
+                slots_total=int(worker.get("slots_total") or 1),
+                worker=worker,
+            )
+            _json_response(
+                self,
+                {
+                    "jobId": job_id,
+                    "workerId": worker_id,
+                    "status": "pending",
+                    "targets": targets,
+                },
+                202,
+            )
+            return
         if path.startswith("/api/workers/") and path.endswith("/settings"):
             worker_id = path.split("/")[3]
             worker = self.store.update_worker_settings(
@@ -1298,7 +1423,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = path.split("/")
         if len(parts) == 4 and parts[1] == "api" and parts[2] == "workers":
             worker_id = parts[3]
-            reserved = {"provision", "runtime", "register", "claim", "heartbeat", "job-archive"}
+            reserved = {"provision", "runtime", "register", "claim", "heartbeat", "job-archive", "update"}
             if worker_id in reserved:
                 _json_response(self, {"error": "not found"}, 404)
                 return
@@ -1321,6 +1446,15 @@ class Handler(BaseHTTPRequestHandler):
                     409,
                 )
                 return
+            if self.worker_updater is not None:
+                active_update = self.store.get_active_worker_update_job_for_worker(worker_id)
+                if active_update:
+                    self.worker_updater.cancel_job(
+                        str(active_update["job_id"]),
+                        worker_id=worker_id,
+                        ssh_host_alias=str(worker.get("ssh_host_alias") or ""),
+                        connection_mode=str(worker.get("connection_mode") or "tunnel"),
+                    )
             if self.provisioner is not None:
                 latest = self.store.get_latest_provision_job_for_worker(worker_id)
                 if latest and str(latest["status"]) in {"pending", "running"}:
@@ -1381,6 +1515,13 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap_script_path=bootstrap_script,
         tunnel_state_path=layout.controller_dir / "tunnels.json",
     )
+    worker_updater = WorkerUpdater(
+        store=store,
+        ssh_config_path=ssh_config_path,
+        auth_token=str(args.auth_token or "") or "",
+        controller_port=args.port,
+        provisioner=provisioner,
+    )
     asset_syncer = AssetSyncer(
         store=store,
         ssh_config_path=ssh_config_path,
@@ -1390,6 +1531,7 @@ def main(argv: list[str] | None = None) -> int:
     Handler.store = store
     Handler.auth_token = str(args.auth_token or "") or None
     Handler.provisioner = provisioner
+    Handler.worker_updater = worker_updater
     Handler.asset_syncer = asset_syncer
     Handler.controller_shared_root = layout.root
     Handler.ssh_config_path = ssh_config_path

@@ -178,6 +178,19 @@ class Store:
                     created_at TEXT NOT NULL,
                     finished_at TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS worker_update_jobs (
+                    job_id       TEXT PRIMARY KEY,
+                    worker_id    TEXT NOT NULL,
+                    targets_json TEXT NOT NULL,
+                    status       TEXT NOT NULL,
+                    current_step TEXT,
+                    steps_json   TEXT NOT NULL,
+                    log_text     TEXT NOT NULL DEFAULT '',
+                    error_text   TEXT,
+                    created_at   TEXT NOT NULL,
+                    finished_at  TEXT
+                );
                 """
             )
 
@@ -703,6 +716,7 @@ class Store:
             ).fetchone()
             if not existing:
                 return False
+            conn.execute("DELETE FROM worker_update_jobs WHERE worker_id = ?", (worker_id,))
             conn.execute("DELETE FROM provision_jobs WHERE worker_id = ?", (worker_id,))
             conn.execute("DELETE FROM workers WHERE worker_id = ?", (worker_id,))
         return True
@@ -889,6 +903,128 @@ class Store:
 
     def _provision_job_item(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
+        item["steps"] = json.loads(item.pop("steps_json"))
+        item["log_tail"] = item["log_text"][-8192:] if item.get("log_text") else ""
+        return item
+
+    def create_worker_update_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        targets: list[str],
+        steps: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO worker_update_jobs(
+                    job_id, worker_id, targets_json, status, current_step,
+                    steps_json, log_text, error_text, created_at, finished_at
+                ) VALUES(?, ?, ?, 'pending', NULL, ?, '', NULL, ?, NULL)
+                """,
+                (
+                    job_id,
+                    worker_id,
+                    json.dumps(targets, ensure_ascii=False),
+                    json.dumps(steps, ensure_ascii=False),
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM worker_update_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._worker_update_job_item(row)
+
+    def get_worker_update_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM worker_update_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._worker_update_job_item(row) if row else None
+
+    def get_latest_worker_update_job_for_worker(self, worker_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM worker_update_jobs
+                WHERE worker_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (worker_id,),
+            ).fetchone()
+        return self._worker_update_job_item(row) if row else None
+
+    def get_active_worker_update_job_for_worker(self, worker_id: str) -> dict[str, Any] | None:
+        latest = self.get_latest_worker_update_job_for_worker(worker_id)
+        if not latest:
+            return None
+        if str(latest["status"]) in {"pending", "running"}:
+            return latest
+        return None
+
+    def append_worker_update_log(self, job_id: str, chunk: str) -> None:
+        if not chunk:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE worker_update_jobs
+                SET log_text = log_text || ?
+                WHERE job_id = ?
+                """,
+                (chunk, job_id),
+            )
+
+    def update_worker_update_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        current_step: str | None = None,
+        steps: list[dict[str, Any]] | None = None,
+        error_text: str | None = None,
+        finished: bool = False,
+    ) -> dict[str, Any] | None:
+        now = now_iso()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM worker_update_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            next_status = status or str(row["status"])
+            next_step = current_step if current_step is not None else row["current_step"]
+            next_steps_json = (
+                json.dumps(steps, ensure_ascii=False)
+                if steps is not None
+                else str(row["steps_json"])
+            )
+            next_error = error_text if error_text is not None else row["error_text"]
+            finished_at = now if finished else row["finished_at"]
+            conn.execute(
+                """
+                UPDATE worker_update_jobs
+                SET status = ?, current_step = ?, steps_json = ?,
+                    error_text = ?, finished_at = ?
+                WHERE job_id = ?
+                """,
+                (next_status, next_step, next_steps_json, next_error, finished_at, job_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM worker_update_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._worker_update_job_item(updated)
+
+    def _worker_update_job_item(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["targets"] = json.loads(item.pop("targets_json"))
         item["steps"] = json.loads(item.pop("steps_json"))
         item["log_tail"] = item["log_text"][-8192:] if item.get("log_text") else ""
         return item
@@ -1590,6 +1726,11 @@ class Store:
             latest = self.get_latest_provision_job_for_worker(str(item["worker_id"]))
             if latest:
                 item["last_provision_job_id"] = latest["job_id"]
+            latest_update = self.get_latest_worker_update_job_for_worker(str(item["worker_id"]))
+            if latest_update:
+                item["last_update_job_id"] = latest_update["job_id"]
+                if str(latest_update["status"]) in {"pending", "running"}:
+                    item["update_status"] = "updating"
             return item
         if provision_status == "failed":
             item["status"] = "provision_failed"
@@ -1598,6 +1739,11 @@ class Store:
             latest = self.get_latest_provision_job_for_worker(str(item["worker_id"]))
             if latest:
                 item["last_provision_job_id"] = latest["job_id"]
+            latest_update = self.get_latest_worker_update_job_for_worker(str(item["worker_id"]))
+            if latest_update:
+                item["last_update_job_id"] = latest_update["job_id"]
+                if str(latest_update["status"]) in {"pending", "running"}:
+                    item["update_status"] = "updating"
             return item
         status = str(item.get("status") or "online")
         last = item.get("last_heartbeat_at")
@@ -1616,4 +1762,9 @@ class Store:
         latest = self.get_latest_provision_job_for_worker(str(item["worker_id"]))
         if latest:
             item["last_provision_job_id"] = latest["job_id"]
+        latest_update = self.get_latest_worker_update_job_for_worker(str(item["worker_id"]))
+        if latest_update:
+            item["last_update_job_id"] = latest_update["job_id"]
+            if str(latest_update["status"]) in {"pending", "running"}:
+                item["update_status"] = "updating"
         return item

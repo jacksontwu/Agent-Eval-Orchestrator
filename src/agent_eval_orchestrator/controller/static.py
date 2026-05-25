@@ -638,6 +638,18 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
 
+  <div class="modal hidden" id="updateWorkerModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>更新 Worker 代码</h3>
+        </div>
+        <button class="modal-close" id="updateWorkerModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="updateWorkerModalBody"></div>
+    </div>
+  </div>
+
   <div class="modal hidden" id="deleteWorkerModal">
     <div class="modal-card">
       <div class="modal-header">
@@ -678,6 +690,8 @@ INDEX_HTML = """<!doctype html>
         worker: "",
       },
       provisionJob: null,
+      updateJob: null,
+      updateWorkerPhase: "confirm",
       sshHosts: [],
       addWorkerPhase: "form",
       pendingDeleteWorkerId: null,
@@ -690,7 +704,7 @@ INDEX_HTML = """<!doctype html>
       if (!cls) {
         cls = "idle";
         if (["online", "finished", "succeeded", "completed", "enabled", "ready", "cleaned"].includes(lower)) cls = "ok";
-        else if (["running", "queued", "provisioning", "syncing", "cleaning"].includes(lower)) cls = "warn";
+        else if (["running", "queued", "provisioning", "syncing", "cleaning", "updating"].includes(lower)) cls = "warn";
         else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed", "interrupted", "provision_failed", "sync_failed", "danger"].includes(lower)) cls = "bad";
         else if (["missing-result"].includes(lower)) cls = "warn";
       } else if (cls === "danger") {
@@ -1349,6 +1363,21 @@ INDEX_HTML = """<!doctype html>
       const runtime = runtimeForWorker(worker.worker_id) || {};
       const runningRows = (runtime.runningBatches || []).map(runtimeBatchRow).join("") || '<div class="empty">当前没有运行中的 batch</div>';
       const queuedRows = (runtime.queuedBatches || []).map(runtimeBatchRow).join("") || '<div class="empty">当前没有排队 batch</div>';
+      const hasSsh = Boolean(worker.ssh_host_alias);
+      const hasActiveBatches = (runtime.runningCount || 0) > 0 || (runtime.queuedCount || 0) > 0;
+      const isUpdating = worker.update_status === "updating";
+      let updateBtnLabel = "更新代码";
+      let updateBtnDisabled = "";
+      let updateBtnTitle = "";
+      if (!hasSsh) {
+        updateBtnDisabled = " disabled";
+        updateBtnTitle = ' title="需要 SSH 配置才能远程更新"';
+      } else if (hasActiveBatches) {
+        updateBtnDisabled = " disabled";
+        updateBtnTitle = ' title="请先等待运行中的 batch 完成"';
+      } else if (isUpdating) {
+        updateBtnLabel = "更新中…";
+      }
       root.innerHTML =
         '<div class="detail-grid">' +
           '<div class="stat"><div class="subtle">Worker ID</div><strong><code>' + esc(worker.worker_id) + '</code></strong></div>' +
@@ -1377,6 +1406,7 @@ INDEX_HTML = """<!doctype html>
           '<div class="actions">' +
             '<button class="primary" type="submit">保存配置</button>' +
             '<button class="ghost" type="button" id="toggleEnabledBtn">' + (worker.enabled ? "设为禁用" : "设为启用") + '</button>' +
+            '<button class="ghost" type="button" id="updateWorkerBtn"' + updateBtnDisabled + updateBtnTitle + '>' + updateBtnLabel + '</button>' +
             '<button class="danger" type="button" id="deleteWorkerBtn"' +
               ((runtime.runningCount || 0) > 0 || (runtime.queuedCount || 0) > 0 ? ' disabled title="请先等待或停止运行中的 batch"' : '') +
             '>删除 Worker</button>' +
@@ -1418,6 +1448,21 @@ INDEX_HTML = """<!doctype html>
         deleteBtn.addEventListener("click", () => openDeleteWorkerModal(worker));
       }
 
+      const updateBtn = root.querySelector("#updateWorkerBtn");
+      if (updateBtn) {
+        updateBtn.addEventListener("click", () => {
+          if (isUpdating && worker.last_update_job_id) {
+            state.updateJob = { jobId: worker.last_update_job_id, workerId: worker.worker_id };
+            state.updateWorkerPhase = "progress";
+            openUpdateWorkerModal();
+            return;
+          }
+          state.updateJob = { workerId: worker.worker_id };
+          state.updateWorkerPhase = "confirm";
+          openUpdateWorkerModal();
+        });
+      }
+
       const viewLogBtn = root.querySelector("#viewProvisionLogBtn");
       if (viewLogBtn) {
         viewLogBtn.addEventListener("click", () => {
@@ -1429,6 +1474,144 @@ INDEX_HTML = """<!doctype html>
     }
 
     let provisionPollTimer = null;
+    let updatePollTimer = null;
+
+    function renderUpdateConfirmForm() {
+      return '' +
+        '<p class="subtle" style="margin-bottom:12px">更新将停止 Worker Daemon 并重启，期间该 worker 无法领取新任务。</p>' +
+        '<form id="updateWorkerForm">' +
+          '<label style="display:block;margin-bottom:8px"><input type="checkbox" name="targetAeo" checked /> 更新 AEO (agent-eval-orchestrator)</label>' +
+          '<label style="display:block;margin-bottom:16px"><input type="checkbox" name="targetHarbor" checked /> 更新 Harbor</label>' +
+          '<div class="actions">' +
+            '<button class="primary" type="submit">开始更新</button>' +
+            '<button class="ghost" type="button" id="updateWorkerCancelForm">取消</button>' +
+          '</div>' +
+        '</form>';
+    }
+
+    function renderUpdateProgress() {
+      const job = state.updateJob?.detail;
+      if (!job) {
+        return '<div class="empty">正在加载更新状态...</div>';
+      }
+      const stepsHtml = (job.steps || []).map(step =>
+        '<div class="queue-row">' +
+          '<div class="queue-title"><strong>' + esc(step.label) + '</strong>' + badge(step.status) + '</div>' +
+        '</div>'
+      ).join("");
+      const actions = [];
+      if (job.status === "running" || job.status === "pending") {
+        actions.push('<button class="ghost" type="button" id="updateCancelBtn">取消</button>');
+      }
+      if (job.status === "succeeded") {
+        actions.push('<button class="primary" type="button" id="updateCloseBtn">关闭</button>');
+      }
+      if (job.status === "failed" || job.status === "cancelled") {
+        actions.push('<button class="primary" type="button" id="updateRetryBtn">重试</button>');
+        actions.push('<button class="ghost" type="button" id="updateCloseBtn">关闭</button>');
+      }
+      return '' +
+        '<div class="detail-grid" style="margin-bottom:16px">' +
+          '<div class="stat"><div class="subtle">Job</div><strong><code>' + esc(job.jobId) + '</code></strong></div>' +
+          '<div class="stat"><div class="subtle">Worker</div><strong><code>' + esc(job.workerId) + '</code></strong></div>' +
+          '<div class="stat"><div class="subtle">Status</div><strong>' + badge(job.status) + '</strong></div>' +
+        '</div>' +
+        stepsHtml +
+        (job.errorText ? '<div class="empty" style="color:var(--bad);margin-top:12px">' + esc(job.errorText) + '</div>' : '') +
+        '<pre style="margin-top:12px;max-height:240px">' + esc(job.logTail || "") + '</pre>' +
+        '<div class="actions" style="margin-top:12px">' + actions.join("") + '</div>';
+    }
+
+    function closeUpdateWorkerModal() {
+      state.updateJob = null;
+      state.updateWorkerPhase = "confirm";
+      if (updatePollTimer) {
+        clearInterval(updatePollTimer);
+        updatePollTimer = null;
+      }
+      document.getElementById("updateWorkerModal").classList.add("hidden");
+    }
+
+    async function renderUpdateWorkerModal() {
+      const body = document.getElementById("updateWorkerModalBody");
+      if (state.updateWorkerPhase === "confirm") {
+        body.innerHTML = renderUpdateConfirmForm();
+        document.getElementById("updateWorkerCancelForm").addEventListener("click", closeUpdateWorkerModal);
+        document.getElementById("updateWorkerForm").addEventListener("submit", submitUpdateWorkerForm);
+        return;
+      }
+      body.innerHTML = renderUpdateProgress();
+      bindUpdateProgressActions();
+    }
+
+    function openUpdateWorkerModal() {
+      renderUpdateWorkerModal();
+      document.getElementById("updateWorkerModal").classList.remove("hidden");
+      if (state.updateWorkerPhase === "progress" && state.updateJob?.jobId) {
+        startUpdatePolling();
+      }
+    }
+
+    async function submitUpdateWorkerForm(event) {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      const targets = [];
+      if (form.get("targetAeo")) targets.push("aeo");
+      if (form.get("targetHarbor")) targets.push("harbor");
+      if (!targets.length) {
+        alert("请至少选择一个仓库");
+        return;
+      }
+      const workerId = state.updateJob.workerId;
+      const result = await api("/api/workers/" + encodeURIComponent(workerId) + "/update", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ targets }),
+      });
+      state.updateJob = { jobId: result.jobId, workerId: result.workerId };
+      state.updateWorkerPhase = "progress";
+      await renderUpdateWorkerModal();
+      startUpdatePolling();
+    }
+
+    async function pollUpdateJob() {
+      if (!state.updateJob?.jobId) return;
+      const detail = await api("/api/workers/update/" + encodeURIComponent(state.updateJob.jobId));
+      state.updateJob.detail = detail;
+      await renderUpdateWorkerModal();
+      if (["succeeded", "failed", "cancelled"].includes(detail.status)) {
+        clearInterval(updatePollTimer);
+        updatePollTimer = null;
+        await loadDashboard();
+      }
+    }
+
+    function startUpdatePolling() {
+      if (updatePollTimer) clearInterval(updatePollTimer);
+      pollUpdateJob();
+      updatePollTimer = setInterval(pollUpdateJob, 2000);
+    }
+
+    function bindUpdateProgressActions() {
+      const cancelBtn = document.getElementById("updateCancelBtn");
+      if (cancelBtn) {
+        cancelBtn.addEventListener("click", async () => {
+          await api("/api/workers/update/" + encodeURIComponent(state.updateJob.jobId) + "/cancel", {
+            method: "POST",
+          });
+          await pollUpdateJob();
+        });
+      }
+      const closeBtn = document.getElementById("updateCloseBtn");
+      if (closeBtn) closeBtn.addEventListener("click", closeUpdateWorkerModal);
+      const retryBtn = document.getElementById("updateRetryBtn");
+      if (retryBtn) {
+        retryBtn.addEventListener("click", () => {
+          state.updateWorkerPhase = "confirm";
+          renderUpdateWorkerModal();
+        });
+      }
+    }
 
     function closeAddWorkerModal() {
       state.provisionJob = null;
@@ -1764,6 +1947,10 @@ INDEX_HTML = """<!doctype html>
     document.getElementById("addWorkerModalClose").addEventListener("click", closeAddWorkerModal);
     document.getElementById("addWorkerModal").addEventListener("click", (event) => {
       if (event.target.id === "addWorkerModal") closeAddWorkerModal();
+    });
+    document.getElementById("updateWorkerModalClose").addEventListener("click", closeUpdateWorkerModal);
+    document.getElementById("updateWorkerModal").addEventListener("click", (event) => {
+      if (event.target.id === "updateWorkerModal") closeUpdateWorkerModal();
     });
     document.getElementById("deleteWorkerModalClose").addEventListener("click", closeDeleteWorkerModal);
     document.getElementById("cancelDeleteWorkerBtn").addEventListener("click", closeDeleteWorkerModal);

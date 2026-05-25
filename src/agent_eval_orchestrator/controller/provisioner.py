@@ -52,18 +52,24 @@ def build_daemon_start_command(
     slots: int,
     controller_url: str,
     auth_token: str,
+    aeo_dir: str | None = None,
+    uv_bin: str | None = None,
+    log_dir: str | None = None,
 ) -> str:
-    local_root = f"{DEFAULT_AEO_DIR}/runtime/workers/{worker_id}/local"
-    log_path = f"{DEFAULT_WORKER_LOG_DIR}/daemon-{worker_id}.log"
+    aeo = aeo_dir or DEFAULT_AEO_DIR
+    uv = uv_bin or DEFAULT_UV_BIN
+    logs = log_dir or DEFAULT_WORKER_LOG_DIR
+    local_root = f"{aeo}/runtime/workers/{worker_id}/local"
+    log_path = f"{logs}/daemon-{worker_id}.log"
     return (
-        f"( mkdir -p {DEFAULT_WORKER_LOG_DIR} && "
-        f"cd {DEFAULT_AEO_DIR} && "
-        f"setsid {DEFAULT_UV_BIN} run python -u -m agent_eval_orchestrator.worker.daemon "
+        f"( mkdir -p {logs} && "
+        f"cd {aeo} && "
+        f"setsid {uv} run python -u -m agent_eval_orchestrator.worker.daemon "
         f'--controller-url "{controller_url}" '
         f'--worker-id "{worker_id}" '
         f'--display-name "{display_name}" '
         f'--host "$(hostname -f || hostname)" '
-        f"--shared-root {DEFAULT_AEO_DIR}/runtime "
+        f"--shared-root {aeo}/runtime "
         f'--local-root "{local_root}" '
         f"--slots {slots} "
         f"--poll-interval 3 "
