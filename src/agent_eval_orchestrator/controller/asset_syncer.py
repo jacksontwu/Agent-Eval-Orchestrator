@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from agent_eval_orchestrator.controller.ssh_runner import SshRunner
+from agent_eval_orchestrator.core.ids import new_id
 from agent_eval_orchestrator.core.worker_paths import build_sync_bind_mounts
 
 if TYPE_CHECKING:
@@ -307,6 +308,83 @@ class AssetSyncer:
 
         self.store.update_run_sync_fields(run_id=run_id, sync_status="succeeded")
         self.store.update_asset_sync_job(job_id, status="succeeded", steps=steps, finished=True)
+
+    def start_rerun_sync_async(self, *, job_id: str, run_id: str) -> None:
+        thread = threading.Thread(
+            target=self.sync_rerun_job,
+            kwargs={"job_id": job_id, "run_id": run_id},
+            daemon=True,
+        )
+        thread.start()
+
+    def sync_rerun_job(self, *, job_id: str, run_id: str) -> None:
+        rerun_job = self.store.get_run_rerun_job(job_id)
+        if not rerun_job:
+            raise RuntimeError("rerun job not found")
+        run = self.store.get_run(run_id)
+        if not run:
+            raise RuntimeError("run not found")
+        manifest = dict(run.get("sync_manifest") or {})
+        template = self.store.get_task_template(str(run["template_id"]))
+        worker_shards = dict(rerun_job["worker_shards"])
+        worker_ids = list(worker_shards.keys())
+        steps = initial_worker_steps(worker_ids)
+        sync_job_id = new_id("sync")
+        self.store.update_run_rerun_job(job_id, status="running", sync_job_id=sync_job_id)
+        self.store.create_asset_sync_job(job_id=sync_job_id, run_id=run_id, steps=steps)
+        self.store.update_asset_sync_job(sync_job_id, status="running", steps=steps)
+
+        errors: list[str] = []
+        lock = threading.Lock()
+
+        def worker_thread(worker_id: str) -> None:
+            nonlocal steps
+            case_ids = list(worker_shards[worker_id])
+            base_entry = dict((manifest.get("workers") or {}).get(worker_id) or {})
+            entry = {**base_entry, "caseIds": case_ids}
+            try:
+                with lock:
+                    steps = set_worker_step_status(steps, worker_id, "sync_cases", "running")
+                    self.store.update_asset_sync_job(sync_job_id, steps=steps)
+                self._sync_cases(entry, manifest)
+                with lock:
+                    steps = set_worker_step_status(steps, worker_id, "sync_cases", "succeeded")
+                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "running")
+                    self.store.update_asset_sync_job(sync_job_id, steps=steps)
+                self._sync_bitfun(entry, manifest)
+                with lock:
+                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
+                    self.store.update_asset_sync_job(sync_job_id, steps=steps)
+                self.store.promote_worker_batches_to_queued(run_id=run_id, worker_id=worker_id)
+            except Exception as exc:
+                with lock:
+                    steps = set_worker_step_status(steps, worker_id, "sync_cases", "failed")
+                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
+                    self.store.update_asset_sync_job(sync_job_id, steps=steps)
+                self.store.mark_worker_batches_sync_failed(run_id=run_id, worker_id=worker_id)
+                errors.append(f"{worker_id}: {exc}")
+
+        threads = [threading.Thread(target=worker_thread, args=(worker_id,), daemon=True) for worker_id in worker_ids]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        if errors:
+            self.store.update_run_rerun_fields(run_id=run_id, rerun_status="failed")
+            self.store.update_run_rerun_job(job_id, status="failed", error_text="; ".join(errors), finished=True)
+            self.store.update_asset_sync_job(
+                sync_job_id,
+                status="failed",
+                steps=steps,
+                error_text="; ".join(errors),
+                finished=True,
+            )
+            return
+
+        self.store.update_run_rerun_fields(run_id=run_id, rerun_status="running")
+        self.store.update_run_rerun_job(job_id, status="running")
+        self.store.update_asset_sync_job(sync_job_id, status="succeeded", steps=steps, finished=True)
 
     def _sync_cases(self, entry: dict[str, Any], manifest: dict[str, Any]) -> None:
         dataset_path = Path(str(manifest["datasetPath"]))

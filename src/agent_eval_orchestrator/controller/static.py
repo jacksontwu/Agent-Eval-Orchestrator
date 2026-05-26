@@ -699,6 +699,7 @@ INDEX_HTML = """<!doctype html>
       pendingDeleteWorkerId: null,
       syncPollTimer: null,
       syncJob: null,
+      rerunPollTimer: null,
     };
 
     function badge(value, cls) {
@@ -747,6 +748,30 @@ INDEX_HTML = """<!doctype html>
       };
       const entry = map[syncStatus] || [syncStatus, "warn"];
       return badge(entry[0], entry[1]);
+    }
+
+    function rerunStatusBadge(rerunStatus) {
+      if (!rerunStatus || rerunStatus === "idle") return "";
+      const map = {
+        syncing: ["rerun syncing", "warn"],
+        running: ["rerun running", "warn"],
+        succeeded: ["rerun ok", "ok"],
+        failed: ["rerun failed", "bad"],
+      };
+      const entry = map[rerunStatus] || [rerunStatus, "warn"];
+      return badge(entry[0], entry[1]);
+    }
+
+    function rerunDisabledReason(detail) {
+      if (!detail) return "Run 尚未全部完成";
+      const status = String(detail.run?.status || detail.status || "").toLowerCase();
+      const primaryFinished = detail.canRerunExceptions !== undefined
+        ? detail.canRerunExceptions || detail.rerunStatus === "syncing" || detail.rerunStatus === "running"
+        : status === "finished";
+      if (!primaryFinished && !detail.canRerunExceptions) return "Run 尚未全部完成";
+      if ((detail.exceptionCount || 0) <= 0) return "没有需要重跑的 exception case";
+      if (["syncing", "running"].includes(String(detail.rerunStatus || ""))) return "已有重跑任务进行中";
+      return "";
     }
 
     function fmtNumber(value) {
@@ -1048,6 +1073,48 @@ INDEX_HTML = """<!doctype html>
       window.open(info.url, "_blank", "noopener,noreferrer");
     }
 
+    function renderRerunStatusPanel(detail) {
+      const status = String(detail.rerunStatus || "idle");
+      if (status === "idle") return "";
+      return '<div class="panel" style="margin-bottom:16px"><div class="panel-body detail">' +
+        '<div class="item-title"><strong>Exception 重跑</strong>' + rerunStatusBadge(status) + '</div>' +
+        '<div class="subtle">remaining exceptions: ' + esc(detail.exceptionCount ?? 0) + '</div>' +
+        (state.rerunJobDetail?.errorText ? '<pre class="error-text">' + esc(state.rerunJobDetail.errorText) + '</pre>' : '') +
+      '</div></div>';
+    }
+
+    async function pollRerunJob(runId) {
+      const detail = await api("/api/runs/" + encodeURIComponent(runId) + "/rerun");
+      state.rerunJobDetail = detail;
+      if (state.selectedTaskId === runId) {
+        await loadTaskDetail(runId);
+      }
+      if (["succeeded", "failed", "idle"].includes(String(detail.rerunStatus || ""))) {
+        clearInterval(state.rerunPollTimer);
+        state.rerunPollTimer = null;
+        await loadDashboard();
+      }
+    }
+
+    async function startRerunExceptions(runId, detail) {
+      const reason = rerunDisabledReason(detail);
+      if (reason) {
+        alert(reason);
+        return;
+      }
+      const workerCount = Object.keys(detail.workerGroups || {}).length || 1;
+      const msg = "将重跑 " + (detail.exceptionCount || 0) + " 个 exception case，分布在 " + workerCount + " 个 worker。是否继续？";
+      if (!confirm(msg)) return;
+      await api("/api/runs/" + encodeURIComponent(runId) + "/rerun-exceptions", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}",
+      });
+      if (state.rerunPollTimer) clearInterval(state.rerunPollTimer);
+      state.rerunPollTimer = setInterval(() => pollRerunJob(runId), 2500);
+      await pollRerunJob(runId);
+    }
+
     function renderTaskDetail() {
       const root = document.getElementById("taskDetail");
       const detail = state.taskDetail;
@@ -1072,7 +1139,9 @@ INDEX_HTML = """<!doctype html>
         '</div>' +
         '<div class="actions" style="margin-bottom:16px">' +
           '<button class="primary" type="button" id="openGlobalViewerBtn">打开 Harbor Viewer</button>' +
+          '<button class="secondary" type="button" id="rerunExceptionsBtn">重跑 Exception</button>' +
         '</div>' +
+        renderRerunStatusPanel(detail) +
         (groups.length ? renderWorkerTabsHtml(groups) : '<div class="empty">这个 task 暂无 worker 执行记录</div>') +
         renderViewerMountHtml();
 
@@ -1089,6 +1158,15 @@ INDEX_HTML = """<!doctype html>
       const globalViewerBtn = root.querySelector("#openGlobalViewerBtn");
       if (globalViewerBtn) {
         globalViewerBtn.addEventListener("click", openGlobalHarborViewer);
+      }
+      const rerunBtn = root.querySelector("#rerunExceptionsBtn");
+      if (rerunBtn) {
+        const reason = rerunDisabledReason(detail);
+        rerunBtn.disabled = Boolean(reason);
+        rerunBtn.title = reason || "";
+        rerunBtn.addEventListener("click", async () => {
+          await startRerunExceptions(run.run_id, detail);
+        });
       }
       root.querySelectorAll("[data-case-key]").forEach(btn => {
         btn.addEventListener("click", () => {

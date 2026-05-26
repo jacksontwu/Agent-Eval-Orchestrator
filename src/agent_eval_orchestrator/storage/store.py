@@ -231,6 +231,41 @@ class Store:
                 );
                 """
             )
+
+            rerun_run_columns = {
+                "rerun_status": "TEXT NOT NULL DEFAULT 'idle'",
+                "rerun_job_id": "TEXT",
+            }
+            for column, ddl in rerun_run_columns.items():
+                if column not in run_columns:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {column} {ddl}")
+
+            batch_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(batches)").fetchall()
+            }
+            for column, ddl in {
+                "parent_batch_id": "TEXT",
+                "batch_kind": "TEXT NOT NULL DEFAULT 'primary'",
+            }.items():
+                if column not in batch_columns:
+                    conn.execute(f"ALTER TABLE batches ADD COLUMN {column} {ddl}")
+
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS run_rerun_jobs (
+                    job_id              TEXT PRIMARY KEY,
+                    run_id              TEXT NOT NULL,
+                    status              TEXT NOT NULL,
+                    sync_job_id         TEXT,
+                    case_ids_json       TEXT NOT NULL,
+                    worker_shards_json  TEXT NOT NULL,
+                    rerun_batches_json  TEXT NOT NULL,
+                    error_text          TEXT,
+                    created_at          TEXT NOT NULL,
+                    finished_at         TEXT
+                );
+                """
+            )
             self._drop_case_details_column_if_present(conn)
 
     def _make_tunnel_remote_port_nullable(self, conn: sqlite3.Connection) -> None:
@@ -424,6 +459,170 @@ class Store:
         terminal = {"succeeded", "failed", "stopped", "sync_failed"}
         return all(str(batch["status"]) in terminal for batch in batches)
 
+    def list_primary_batches_for_run(self, run_id: str) -> list[dict[str, Any]]:
+        return [
+            batch
+            for batch in self.list_batches_for_run(run_id)
+            if str(batch.get("batch_kind") or "primary") == "primary"
+        ]
+
+    def is_run_primary_terminal(self, run_id: str) -> bool:
+        batches = self.list_primary_batches_for_run(run_id)
+        if not batches:
+            return False
+        terminal = {"succeeded", "failed", "stopped", "sync_failed"}
+        return all(str(batch["status"]) in terminal for batch in batches)
+
+    def list_exception_cases_for_run(self, run_id: str) -> list[dict[str, Any]]:
+        exceptions: list[dict[str, Any]] = []
+        for batch in self.list_primary_batches_for_run(run_id):
+            worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip()
+            for case in self.list_case_runs(str(batch["batch_id"])):
+                if not self._case_is_errored(case):
+                    continue
+                exceptions.append(
+                    {
+                        "case_id": str(case["case_id"]),
+                        "parent_batch_id": str(batch["batch_id"]),
+                        "worker_id": worker_id,
+                        "case": case,
+                    }
+                )
+        return exceptions
+
+    def group_exception_cases_by_worker(self, run_id: str) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in self.list_exception_cases_for_run(run_id):
+            worker_id = str(item["worker_id"] or "").strip()
+            if not worker_id:
+                continue
+            grouped.setdefault(worker_id, []).append(item)
+        return grouped
+
+    @staticmethod
+    def _recompute_batch_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+        succeeded = sum(1 for case in cases if str(case.get("status") or "") == "succeeded")
+        failed = sum(1 for case in cases if Store._case_is_failed(case))
+        errored = sum(1 for case in cases if Store._case_is_errored(case))
+        return {
+            "succeeded": succeeded,
+            "failed": failed,
+            "errored": errored,
+            "total": len(cases),
+        }
+
+    def merge_rerun_cases_into_parent(
+        self,
+        *,
+        parent_batch_id: str,
+        rerun_cases: list[dict[str, Any]],
+        rerun_batch_id: str,
+    ) -> dict[str, Any] | None:
+        now = now_iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            parent = conn.execute(
+                "SELECT * FROM batches WHERE batch_id = ?",
+                (parent_batch_id,),
+            ).fetchone()
+            if not parent:
+                conn.execute("ROLLBACK")
+                return None
+            rerun_case_ids = {str(case["caseId"]) for case in rerun_cases}
+            existing_rows = conn.execute(
+                "SELECT * FROM case_runs WHERE batch_id = ?",
+                (parent_batch_id,),
+            ).fetchall()
+            kept = [self._case_item(row) for row in existing_rows if str(row["case_id"]) not in rerun_case_ids]
+            conn.execute("DELETE FROM case_runs WHERE batch_id = ?", (parent_batch_id,))
+            for case in kept:
+                conn.execute(
+                    """
+                    INSERT INTO case_runs(
+                        case_run_id, batch_id, case_id, status, score, metrics_json,
+                        artifact_index_json, error_text, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        case["case_run_id"],
+                        parent_batch_id,
+                        case["original_case_id"],
+                        case["status"],
+                        case.get("score"),
+                        json.dumps(case.get("metrics") or {}, ensure_ascii=False),
+                        json.dumps(case.get("artifact_index") or {}, ensure_ascii=False),
+                        case.get("error_text"),
+                        case["created_at"],
+                        now,
+                    ),
+                )
+            for case in rerun_cases:
+                case_id = str(case["caseId"])
+                metrics = dict(case.get("metrics") or {})
+                if case.get("errorType"):
+                    metrics["errorType"] = case.get("errorType")
+                conn.execute(
+                    """
+                    INSERT INTO case_runs(
+                        case_run_id, batch_id, case_id, status, score, metrics_json,
+                        artifact_index_json, error_text, created_at, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_id("case"),
+                        parent_batch_id,
+                        case_id,
+                        str(case.get("status") or "pending"),
+                        case.get("score"),
+                        json.dumps(metrics, ensure_ascii=False),
+                        json.dumps(case.get("artifactIndex") or {}, ensure_ascii=False),
+                        case.get("errorText"),
+                        now,
+                        now,
+                    ),
+                )
+            merged_cases = [
+                self._case_item(row)
+                for row in conn.execute(
+                    "SELECT * FROM case_runs WHERE batch_id = ?",
+                    (parent_batch_id,),
+                ).fetchall()
+            ]
+            summary = self._recompute_batch_summary(merged_cases)
+            conn.execute(
+                "UPDATE batches SET summary_json = ? WHERE batch_id = ?",
+                (json.dumps(summary, ensure_ascii=False), parent_batch_id),
+            )
+            conn.execute("DELETE FROM case_runs WHERE batch_id = ?", (rerun_batch_id,))
+            updated = conn.execute(
+                "SELECT * FROM batches WHERE batch_id = ?",
+                (parent_batch_id,),
+            ).fetchone()
+        return self._batch_item(updated)
+
+    def finish_rerun_batch_if_complete(self, *, rerun_batch_id: str) -> None:
+        batch = self.get_batch(rerun_batch_id)
+        if not batch or str(batch.get("batch_kind") or "") != "exception_rerun":
+            return
+        run_id = str(batch["run_id"])
+        run = self.get_run(run_id)
+        if not run or not run.get("rerun_job_id"):
+            return
+        job = self.get_run_rerun_job(str(run["rerun_job_id"]))
+        if not job:
+            return
+        rerun_batch_ids = [str(batch_id) for batch_id in job["rerun_batches"].values()]
+        statuses = []
+        for batch_id in rerun_batch_ids:
+            item = self.get_batch(batch_id)
+            statuses.append(str(item["status"]) if item else "missing")
+        terminal = {"succeeded", "failed", "stopped", "sync_failed"}
+        if not all(status in terminal for status in statuses):
+            return
+        final_status = "failed" if any(status in {"failed", "sync_failed", "stopped"} for status in statuses) else "succeeded"
+        self.update_run_rerun_fields(run_id=run_id, rerun_status=final_status)
+        self.update_run_rerun_job(str(job["job_id"]), status=final_status, finished=True)
+
     def create_batch(
         self,
         *,
@@ -432,6 +631,8 @@ class Store:
         preferred_worker_id: str | None,
         batch_options: dict[str, Any] | None,
         initial_status: str = "queued",
+        batch_kind: str = "primary",
+        parent_batch_id: str | None = None,
     ) -> dict[str, Any]:
         run = self.get_run(run_id)
         if not run:
@@ -451,8 +652,8 @@ class Store:
                     assigned_worker_id, executor_kind, executor_metadata_json,
                     selected_case_ids_json, batch_options_json, summary_json,
                     artifact_index_json, batch_root, created_at, started_at, finished_at,
-                    error_text
-                ) VALUES(?, ?, ?, ?, NULL, ?, NULL, ?, '{}', ?, ?, '{}', '{}', ?, ?, NULL, NULL, NULL)
+                    error_text, parent_batch_id, batch_kind
+                ) VALUES(?, ?, ?, ?, NULL, ?, NULL, ?, '{}', ?, ?, '{}', '{}', ?, ?, NULL, NULL, NULL, ?, ?)
                 """,
                 (
                     batch_id,
@@ -465,6 +666,8 @@ class Store:
                     json.dumps(batch_options or {}, ensure_ascii=False),
                     batch_root,
                     now,
+                    parent_batch_id,
+                    batch_kind,
                 ),
             )
             conn.execute(
@@ -1069,6 +1272,125 @@ class Store:
             )
         return self.get_run(run_id)
 
+    def update_run_rerun_fields(
+        self,
+        *,
+        run_id: str,
+        rerun_status: str | None = None,
+        rerun_job_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        run = self.get_run(run_id)
+        if not run:
+            return None
+        next_status = rerun_status if rerun_status is not None else str(run.get("rerun_status") or "idle")
+        next_job_id = rerun_job_id if rerun_job_id is not None else run.get("rerun_job_id")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET rerun_status = ?, rerun_job_id = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_status, next_job_id, now_iso(), run_id),
+            )
+        return self.get_run(run_id)
+
+    def create_run_rerun_job(
+        self,
+        *,
+        job_id: str,
+        run_id: str,
+        case_ids: list[str],
+        worker_shards: dict[str, list[str]],
+        rerun_batches: dict[str, str],
+    ) -> dict[str, Any]:
+        now = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_rerun_jobs(
+                    job_id, run_id, status, sync_job_id,
+                    case_ids_json, worker_shards_json, rerun_batches_json,
+                    error_text, created_at, finished_at
+                ) VALUES(?, ?, 'pending', NULL, ?, ?, ?, NULL, ?, NULL)
+                """,
+                (
+                    job_id,
+                    run_id,
+                    json.dumps(case_ids, ensure_ascii=False),
+                    json.dumps(worker_shards, ensure_ascii=False),
+                    json.dumps(rerun_batches, ensure_ascii=False),
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM run_rerun_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._run_rerun_job_item(row)
+
+    def update_run_rerun_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        sync_job_id: str | None = None,
+        error_text: str | None = None,
+        finished: bool = False,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM run_rerun_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            next_status = status if status is not None else str(row["status"])
+            next_sync_job_id = sync_job_id if sync_job_id is not None else row["sync_job_id"]
+            next_error = error_text if error_text is not None else row["error_text"]
+            finished_at = now_iso() if finished else row["finished_at"]
+            conn.execute(
+                """
+                UPDATE run_rerun_jobs
+                SET status = ?, sync_job_id = ?, error_text = ?, finished_at = ?
+                WHERE job_id = ?
+                """,
+                (next_status, next_sync_job_id, next_error, finished_at, job_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM run_rerun_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._run_rerun_job_item(updated)
+
+    def get_run_rerun_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM run_rerun_jobs WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+        return self._run_rerun_job_item(row) if row else None
+
+    def get_active_run_rerun_job(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM run_rerun_jobs
+                WHERE run_id = ? AND status IN ('pending', 'running')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        return self._run_rerun_job_item(row) if row else None
+
+    def _run_rerun_job_item(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["case_ids"] = json.loads(item.pop("case_ids_json"))
+        item["worker_shards"] = json.loads(item.pop("worker_shards_json"))
+        item["rerun_batches"] = json.loads(item.pop("rerun_batches_json"))
+        return item
+
     def create_asset_sync_job(
         self,
         *,
@@ -1480,6 +1802,9 @@ class Store:
         for run in runs:
             template = templates.get(str(run["template_id"]))
             run_batches = batches_by_run.get(str(run["run_id"]), [])
+            primary_batches = [
+                batch for batch in run_batches if str(batch.get("batch_kind") or "primary") == "primary"
+            ]
             status_counts = {
                 "queued": 0, "pending_sync": 0, "sync_failed": 0,
                 "running": 0, "succeeded": 0, "failed": 0, "stopped": 0,
@@ -1489,8 +1814,8 @@ class Store:
             case_succeeded = 0
             case_failed = 0
             case_errored = 0
-            latest_batch = run_batches[0] if run_batches else None
-            for batch in run_batches:
+            latest_batch = primary_batches[0] if primary_batches else None
+            for batch in primary_batches:
                 status = str(batch["status"])
                 if status in status_counts:
                     status_counts[status] += 1
@@ -1514,7 +1839,7 @@ class Store:
                 overall_status = "queued"
             elif status_counts["succeeded"] > 0 and sum(status_counts.values()) == status_counts["succeeded"]:
                 overall_status = "finished"
-            elif run_batches:
+            elif primary_batches:
                 overall_status = "mixed"
 
             summaries.append(
@@ -1527,7 +1852,7 @@ class Store:
                     "owner": run["owner"],
                     "executorKind": template["executor_kind"] if template else None,
                     "datasetRef": template["dataset_ref"] if template else None,
-                    "batchCount": len(run_batches),
+                    "batchCount": len(primary_batches),
                     "status": overall_status,
                     "statusCounts": status_counts,
                     "workers": workers,
@@ -1548,8 +1873,9 @@ class Store:
             return None
         template = self.get_task_template(str(run["template_id"]))
         batches = self.list_batches_for_run(run_id)
+        primary_batches = [batch for batch in batches if str(batch.get("batch_kind") or "primary") == "primary"]
         worker_groups: dict[str, dict[str, Any]] = {}
-        for batch in batches:
+        for batch in primary_batches:
             worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "unassigned")
             worker = next((item for item in self.list_workers() if item["worker_id"] == worker_id), None)
             group = worker_groups.setdefault(
@@ -1611,7 +1937,23 @@ class Store:
             worker_groups.values(),
             key=lambda item: (item["workerName"], item["workerId"]),
         )
-        return {"run": run, "template": template, "batches": batches, "workerGroups": worker_group_list}
+        exception_count = len(self.list_exception_cases_for_run(run_id))
+        rerun_status = str(run.get("rerun_status") or "idle")
+        can_rerun = (
+            self.is_run_primary_terminal(run_id)
+            and exception_count > 0
+            and rerun_status not in {"syncing", "running"}
+        )
+        return {
+            "run": run,
+            "template": template,
+            "batches": batches,
+            "workerGroups": worker_group_list,
+            "canRerunExceptions": can_rerun,
+            "exceptionCount": exception_count,
+            "rerunStatus": rerun_status,
+            "rerunJobId": run.get("rerun_job_id"),
+        }
 
     def list_batch_summaries(self) -> list[dict[str, Any]]:
         templates = {item["template_id"]: item for item in self.list_task_templates()}
@@ -1691,6 +2033,8 @@ class Store:
         item["sync_manifest"] = json.loads(manifest_raw or "{}")
         if not item.get("sync_status"):
             item["sync_status"] = ""
+        if not item.get("rerun_status"):
+            item["rerun_status"] = "idle"
         return item
 
     def _batch_item(self, row: sqlite3.Row | None) -> dict[str, Any]:
@@ -1700,6 +2044,8 @@ class Store:
         item["batch_options"] = json.loads(item.pop("batch_options_json"))
         item["summary"] = json.loads(item.pop("summary_json"))
         item["artifact_index"] = json.loads(item.pop("artifact_index_json"))
+        if not item.get("batch_kind"):
+            item["batch_kind"] = "primary"
         return item
 
     def _case_item(self, row: sqlite3.Row) -> dict[str, Any]:

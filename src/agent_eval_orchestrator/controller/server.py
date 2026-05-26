@@ -50,6 +50,7 @@ from agent_eval_orchestrator.normalizers.harbor_timestamps import (
     to_harbor_naive_utc_iso,
 )
 from agent_eval_orchestrator.controller.provisioner import Provisioner
+from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator, RerunValidationError
 from agent_eval_orchestrator.controller.worker_updater import WorkerUpdater
 from agent_eval_orchestrator.controller.ssh_config import list_ssh_hosts, test_ssh_alias
 from agent_eval_orchestrator.controller.static import INDEX_HTML
@@ -519,6 +520,7 @@ class Handler(BaseHTTPRequestHandler):
     provisioner: Provisioner | None = None
     worker_updater: WorkerUpdater | None = None
     asset_syncer: AssetSyncer | None = None
+    run_rerun_coordinator: RunRerunCoordinator | None = None
     ssh_config_path: Path | None = None
     controller_shared_root: Path | None = None
 
@@ -877,6 +879,41 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path.startswith("/api/runs/") and path.endswith("/rerun"):
+            run_id = path.split("/")[3]
+            run = self.store.get_run(run_id)
+            if not run:
+                _json_response(self, {"error": "run not found"}, 404)
+                return
+            job = None
+            if run.get("rerun_job_id"):
+                job = self.store.get_run_rerun_job(str(run["rerun_job_id"]))
+            rerun_batches = []
+            if job:
+                for worker_id, batch_id in (job.get("rerun_batches") or {}).items():
+                    batch = self.store.get_batch(str(batch_id))
+                    if batch:
+                        rerun_batches.append(
+                            {
+                                "workerId": worker_id,
+                                "batchId": batch_id,
+                                "status": batch["status"],
+                                "parentBatchId": batch.get("parent_batch_id"),
+                            }
+                        )
+            remaining = len(self.store.list_exception_cases_for_run(run_id))
+            _json_response(
+                self,
+                {
+                    "runId": run_id,
+                    "rerunStatus": run.get("rerun_status") or "idle",
+                    "rerunJobId": run.get("rerun_job_id"),
+                    "job": job,
+                    "rerunBatches": rerun_batches,
+                    "remainingExceptionCount": remaining,
+                },
+            )
+            return
         if path.startswith("/api/runs/"):
             run_id = path.split("/")[3]
             run = self.store.get_run(run_id)
@@ -1117,6 +1154,18 @@ class Handler(BaseHTTPRequestHandler):
                 _json_response(self, {"error": str(exc)}, 400)
                 return
             _json_response(self, {"runId": run_id, "batches": batches}, 201)
+            return
+        if path.startswith("/api/runs/") and path.endswith("/rerun-exceptions"):
+            if self.run_rerun_coordinator is None:
+                _json_response(self, {"error": "rerun coordinator unavailable"}, 500)
+                return
+            run_id = path.split("/")[3]
+            try:
+                result = self.run_rerun_coordinator.start_rerun(run_id)
+            except RerunValidationError as exc:
+                _json_response(self, {"error": exc.message}, exc.code)
+                return
+            _json_response(self, result, 201)
             return
         if path == "/api/workers/register":
             worker = self.store.register_worker(
@@ -1436,6 +1485,28 @@ class Handler(BaseHTTPRequestHandler):
             if not batch:
                 _json_response(self, {"error": "batch not found"}, 404)
                 return
+            batch_row = self.store.get_batch(str(body["batchId"]))
+            if (
+                batch_row
+                and str(batch_row.get("batch_kind") or "") == "exception_rerun"
+                and bool(body.get("finished"))
+                and isinstance(body.get("cases"), list)
+            ):
+                parent_batch_id = str(batch_row.get("parent_batch_id") or "")
+                if parent_batch_id:
+                    self.store.merge_rerun_cases_into_parent(
+                        parent_batch_id=parent_batch_id,
+                        rerun_cases=body["cases"],
+                        rerun_batch_id=str(body["batchId"]),
+                    )
+                    parent_batch = self.store.get_batch(parent_batch_id)
+                    if parent_batch:
+                        parent_job_dir = Path(str(parent_batch["batch_root"])) / "harbor" / "jobs" / parent_batch_id
+                        rerun_job_dir = Path(str(batch_row["batch_root"])) / "harbor" / "jobs" / str(body["batchId"])
+                        if rerun_job_dir.exists():
+                            parent_job_dir.mkdir(parents=True, exist_ok=True)
+                            _copy_trial_dirs(rerun_job_dir, parent_job_dir)
+                    self.store.finish_rerun_batch_if_complete(rerun_batch_id=str(body["batchId"]))
             if self.asset_syncer is not None:
                 batch_row = self.store.get_batch(str(body["batchId"]))
                 if batch_row and self.store.is_run_terminal(str(batch_row["run_id"])):
@@ -1562,12 +1633,14 @@ def main(argv: list[str] | None = None) -> int:
         ssh_config_path=ssh_config_path,
         controller_shared_root=layout.root,
     )
+    run_rerun_coordinator = RunRerunCoordinator(store=store, asset_syncer=asset_syncer)
     server = ThreadedServer((args.host, args.port), Handler)
     Handler.store = store
     Handler.auth_token = str(args.auth_token or "") or None
     Handler.provisioner = provisioner
     Handler.worker_updater = worker_updater
     Handler.asset_syncer = asset_syncer
+    Handler.run_rerun_coordinator = run_rerun_coordinator
     Handler.controller_shared_root = layout.root
     Handler.ssh_config_path = ssh_config_path
     Handler.viewer_manager = HarborViewerManager(
