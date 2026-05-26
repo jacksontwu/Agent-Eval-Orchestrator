@@ -100,7 +100,7 @@ def normalize_harbor_job(job_dir: Path, batch_id: str) -> tuple[dict[str, Any], 
         model_info = agent_info.get("model_info") or {}
         trajectory_summary = _trajectory_summary(trial_dir)
         if exception_info:
-            status = "failed"
+            status = "errored"
         elif reward_value is None:
             status = "succeeded"
         else:
@@ -159,12 +159,14 @@ def normalize_harbor_job(job_dir: Path, batch_id: str) -> tuple[dict[str, Any], 
 
     succeeded = sum(1 for case in cases if case["status"] == "succeeded")
     failed = sum(1 for case in cases if case["status"] == "failed")
+    errored_count = sum(1 for case in cases if case["status"] == "errored")
     summary = {
         "batchId": batch_id,
         "total": total or len(cases),
         "completed": completed or len(cases),
         "succeeded": succeeded,
-        "failed": failed or errored,
+        "failed": failed,
+        "errored": errored_count or errored,
         "cancelled": cancelled,
         "pending": pending if total else 0,
         "rawStats": stats,

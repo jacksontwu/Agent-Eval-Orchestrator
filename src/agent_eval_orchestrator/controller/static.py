@@ -15,6 +15,7 @@ INDEX_HTML = """<!doctype html>
       --ok: #147a50;
       --warn: #8a5a00;
       --bad: #b42318;
+      --err: #7a2eb8;
       --idle: #6c7a86;
       --shadow: 0 12px 40px rgba(15, 23, 42, 0.06);
     }
@@ -299,6 +300,7 @@ INDEX_HTML = """<!doctype html>
     .ok { background: var(--ok); }
     .warn { background: var(--warn); }
     .bad { background: var(--bad); }
+    .err { background: var(--err); }
     .idle { background: var(--idle); }
     .link-btn {
       border: none;
@@ -706,6 +708,7 @@ INDEX_HTML = """<!doctype html>
         if (["online", "finished", "succeeded", "completed", "enabled", "ready", "cleaned"].includes(lower)) cls = "ok";
         else if (["running", "queued", "provisioning", "syncing", "cleaning", "updating"].includes(lower)) cls = "warn";
         else if (["failed", "forbidden", "unavailable", "stopped", "disabled", "mixed", "interrupted", "provision_failed", "sync_failed", "danger"].includes(lower)) cls = "bad";
+        else if (["errored", "exception"].includes(lower)) cls = "err";
         else if (["missing-result"].includes(lower)) cls = "warn";
       } else if (cls === "danger") {
         cls = "bad";
@@ -713,6 +716,23 @@ INDEX_HTML = """<!doctype html>
         cls = "ok";
       }
       return '<span class="badge ' + cls + '">' + value + "</span>";
+    }
+
+    function caseIsErrored(item) {
+      const status = String(item.status || "").toLowerCase();
+      if (status === "errored") return true;
+      return status === "failed" && Boolean(item.error_text);
+    }
+
+    function caseStatusBadge(item) {
+      if (caseIsErrored(item)) {
+        return badge("exception", "err");
+      }
+      return badge(item.status);
+    }
+
+    function caseErrorType(item) {
+      return item.errorType || (item.metrics && item.metrics.errorType) || "-";
     }
 
     function syncStatusBadge(syncStatus) {
@@ -974,7 +994,9 @@ INDEX_HTML = """<!doctype html>
             '<span>workers: ' + esc((task.workers || []).join(", ") || "-") + '</span>' +
             '<span>run: <code>' + esc(task.runId) + '</code></span>' +
             '<span>batches: ' + task.batchCount + '</span>' +
-            '<span>cases: ' + task.caseSucceeded + '/' + task.caseTotal + '</span>' +
+            '<span>cases: ' + task.caseSucceeded + '/' + task.caseTotal +
+              (task.caseErrored ? ' · exception: ' + task.caseErrored : '') +
+              (task.caseFailed ? ' · failed: ' + task.caseFailed : '') + '</span>' +
           '</div>' +
         '</button>';
       }).join("");
@@ -1104,6 +1126,9 @@ INDEX_HTML = """<!doctype html>
       const selectedCase = selected
         ? cases.find(item => item.batchId === selected.batchId && item.case_id === selected.caseId)
         : null;
+      const caseSucceeded = cases.filter(item => String(item.status || "").toLowerCase() === "succeeded").length;
+      const caseFailed = cases.filter(item => String(item.status || "").toLowerCase() === "failed" && !item.error_text).length;
+      const caseErrored = cases.filter(item => caseIsErrored(item)).length;
       return '' +
         '<div class="worker-pane">' +
           '<h3>' + esc(group.workerName) + '</h3>' +
@@ -1112,11 +1137,14 @@ INDEX_HTML = """<!doctype html>
             '<span>status: ' + badge(group.workerStatus) + '</span>' +
             '<span>batches: ' + (group.batches || []).length + '</span>' +
             '<span>cases: ' + cases.length + '</span>' +
+            '<span>succeeded: ' + caseSucceeded + '</span>' +
+            '<span>failed: ' + caseFailed + '</span>' +
+            '<span>exception: ' + caseErrored + '</span>' +
           '</div>' +
           '<div class="case-list">' +
             (cases.map(item =>
               '<div class="case-card">' +
-                '<div class="case-title"><strong>' + esc(item.case_id) + '</strong>' + badge(item.status) + '</div>' +
+                '<div class="case-title"><strong>' + esc(item.case_id) + '</strong>' + caseStatusBadge(item) + '</div>' +
                 '<div class="case-meta">' +
                   '<span>batch: <code>' + esc(item.batchId) + '</code></span>' +
                 '</div>' +
@@ -1156,7 +1184,7 @@ INDEX_HTML = """<!doctype html>
             '<tr><th>cachedInputTokens</th><td>' + esc(fmtMetric(item.cachedInputTokens)) + '</td></tr>' +
             '<tr><th>outputTokens</th><td>' + esc(fmtMetric(item.outputTokens)) + '</td></tr>' +
             '<tr><th>toolSummary</th><td><code>' + esc(JSON.stringify(item.toolSummary || {})) + '</code></td></tr>' +
-            '<tr><th>errorType</th><td>' + esc(item.errorType || "-") + '</td></tr>' +
+            '<tr><th>errorType</th><td>' + esc(caseErrorType(item)) + '</td></tr>' +
             '<tr><th>errorText</th><td>' + esc(item.errorText || "-") + '</td></tr>' +
             '<tr><th>trialDir</th><td><code>' + esc(artifact.trialDir || "-") + '</code></td></tr>' +
             '<tr><th>resultPath</th><td><code>' + esc(artifact.resultPath || "-") + '</code></td></tr>' +

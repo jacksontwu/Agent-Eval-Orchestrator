@@ -22,6 +22,17 @@ class Store:
         self.layout.ensure_dirs()
         self._init_schema()
 
+    @staticmethod
+    def _case_is_errored(case: dict[str, Any]) -> bool:
+        status = str(case.get("status") or "")
+        if status == "errored":
+            return True
+        return status == "failed" and bool(case.get("error_text"))
+
+    @staticmethod
+    def _case_is_failed(case: dict[str, Any]) -> bool:
+        return str(case.get("status") or "") == "failed" and not case.get("error_text")
+
     @contextmanager
     def connect(self) -> Any:
         conn = sqlite3.connect(self.layout.db_path)
@@ -1365,6 +1376,9 @@ class Store:
                 conn.execute("DELETE FROM case_runs WHERE batch_id = ?", (batch_id,))
                 for case in cases:
                     case_id = str(case["caseId"])
+                    metrics = dict(case.get("metrics") or {})
+                    if case.get("errorType"):
+                        metrics["errorType"] = case.get("errorType")
                     conn.execute(
                         """
                         INSERT INTO case_runs(
@@ -1378,7 +1392,7 @@ class Store:
                             case_id,
                             str(case.get("status") or "pending"),
                             case.get("score"),
-                            json.dumps(case.get("metrics") or {}, ensure_ascii=False),
+                            json.dumps(metrics, ensure_ascii=False),
                             json.dumps(case.get("artifactIndex") or {}, ensure_ascii=False),
                             case.get("errorText"),
                             now,
@@ -1474,6 +1488,7 @@ class Store:
             case_total = 0
             case_succeeded = 0
             case_failed = 0
+            case_errored = 0
             latest_batch = run_batches[0] if run_batches else None
             for batch in run_batches:
                 status = str(batch["status"])
@@ -1485,7 +1500,8 @@ class Store:
                 batch_cases = cases_by_batch.get(str(batch["batch_id"]), [])
                 case_total += len(batch_cases)
                 case_succeeded += sum(1 for case in batch_cases if case["status"] == "succeeded")
-                case_failed += sum(1 for case in batch_cases if case["status"] == "failed")
+                case_failed += sum(1 for case in batch_cases if self._case_is_failed(case))
+                case_errored += sum(1 for case in batch_cases if self._case_is_errored(case))
 
             overall_status = "idle"
             if status_counts["running"] > 0:
@@ -1518,6 +1534,7 @@ class Store:
                     "caseTotal": case_total,
                     "caseSucceeded": case_succeeded,
                     "caseFailed": case_failed,
+                    "caseErrored": case_errored,
                     "latestBatchId": latest_batch["batch_id"] if latest_batch else None,
                     "latestUpdatedAt": latest_batch["finished_at"] if latest_batch and latest_batch["finished_at"] else latest_batch["started_at"] if latest_batch else None,
                     "syncStatus": str(run.get("sync_status") or ""),
@@ -1624,7 +1641,8 @@ class Store:
                     "summary": batch["summary"],
                     "caseCount": len(cases),
                     "caseSucceeded": sum(1 for case in cases if case["status"] == "succeeded"),
-                    "caseFailed": sum(1 for case in cases if case["status"] == "failed"),
+                    "caseFailed": sum(1 for case in cases if self._case_is_failed(case)),
+                    "caseErrored": sum(1 for case in cases if self._case_is_errored(case)),
                     "createdAt": batch["created_at"],
                     "startedAt": batch["started_at"],
                     "finishedAt": batch["finished_at"],
