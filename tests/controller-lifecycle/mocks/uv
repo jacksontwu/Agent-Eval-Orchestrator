@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+echo "$*" >> "${MOCK_UV_LOG:-/tmp/mock-uv.log}"
+if [[ "$1" == "run" ]]; then
+  exit 0
+fi
+exit 1
