@@ -64,3 +64,37 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
     assert "--verifier-timeout-multiplier 2.0" in shell
     assert "--environment-build-timeout-multiplier 1.5" in shell
     assert "/root/.config/bitfun" in shell
+
+
+def test_prepare_applies_default_environment_flags_when_config_omits_them(tmp_path: Path) -> None:
+    batch_root = tmp_path / "batch-root"
+    batch_root.mkdir()
+    dataset = tmp_path / "dataset" / "case-a"
+    dataset.mkdir(parents=True)
+    (dataset / "task.toml").write_text("", encoding="utf-8")
+
+    harbor_repo = tmp_path / "harbor"
+    harbor_repo.mkdir()
+
+    prepared = HarborExecutor().prepare(
+        batch={
+            "batch_id": "batch-test",
+            "batch_root": str(batch_root),
+            "selected_case_ids": ["case-a"],
+        },
+        run={},
+        template={},
+        dataset_ref=str(dataset.parent),
+        executor_config={
+            "agentName": "bitfun-cli",
+            "envType": "docker",
+            "nConcurrent": 1,
+            "harborRepoPath": str(harbor_repo),
+        },
+        local_root=tmp_path / "local",
+        shared_root=None,
+    )
+
+    shell = prepared.command[2]
+    assert "--no-force-build" in shell
+    assert "--no-delete" in shell

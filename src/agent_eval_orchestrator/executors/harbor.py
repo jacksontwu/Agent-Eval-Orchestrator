@@ -6,7 +6,11 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from agent_eval_orchestrator.core.defaults import DEFAULT_HARBOR_REPO
+from agent_eval_orchestrator.core.defaults import (
+    DEFAULT_ENVIRONMENT_DELETE,
+    DEFAULT_ENVIRONMENT_FORCE_BUILD,
+    DEFAULT_HARBOR_REPO,
+)
 from agent_eval_orchestrator.core.worker_paths import resolve_harbor_repo, resolve_uv_binary
 from agent_eval_orchestrator.executors.base import CollectedArtifacts, Executor, PreparedBatch
 
@@ -140,14 +144,12 @@ class HarborExecutor(Executor):
         max_retries = executor_config.get("maxRetries")
         if max_retries is not None:
             harbor_args.extend(["--max-retries", str(max_retries)])
-        if executor_config.get("environmentForceBuild") is True:
-            harbor_args.append("--force-build")
-        elif executor_config.get("environmentForceBuild") is False:
-            harbor_args.append("--no-force-build")
-        if executor_config.get("environmentDelete") is True:
-            harbor_args.append("--delete")
-        elif executor_config.get("environmentDelete") is False:
-            harbor_args.append("--no-delete")
+        force_build = bool(
+            executor_config.get("environmentForceBuild", DEFAULT_ENVIRONMENT_FORCE_BUILD)
+        )
+        harbor_args.append("--force-build" if force_build else "--no-force-build")
+        delete_environment = bool(executor_config.get("environmentDelete", DEFAULT_ENVIRONMENT_DELETE))
+        harbor_args.append("--delete" if delete_environment else "--no-delete")
         mounts = self._resolve_worker_override(executor_config, worker_id, "mounts", None)
         if mounts:
             harbor_args.extend(["--mounts", json.dumps(mounts, ensure_ascii=False)])
