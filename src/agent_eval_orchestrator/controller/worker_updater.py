@@ -49,22 +49,43 @@ def initial_update_step_ids(targets: list[str]) -> list[str]:
     return ids
 
 
-def build_git_pull_command(
-    repo_dir: str,
-    github_token: str | None = None,
-    github_username: str = "JinnanDuan",
-) -> str:
-    parts = [f"cd {repo_dir}", "GIT_TERMINAL_PROMPT=0"]
+def _git_with_auth(subcommand: str, github_token: str | None, github_username: str) -> str:
     if github_token:
         helper = (
             f"!f() {{ echo username={github_username}; "
             f"echo password={shlex.quote(github_token)}; }}; f"
         )
-        parts.append(
-            f"git -c credential.helper= -c credential.helper={shlex.quote(helper)} pull --ff-only"
+        return (
+            f"git -c credential.helper= -c credential.helper={shlex.quote(helper)} {subcommand}"
         )
-    else:
-        parts.append("git pull --ff-only")
+    return f"git {subcommand}"
+
+
+# Remove local untracked files that upstream now tracks (e.g. uv.lock after bootstrap uv sync).
+_GIT_PULL_PRE_CLEAN = (
+    'upstream="$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)"; '
+    "if [ -n \"$upstream\" ]; then "
+    '  while IFS= read -r path; do '
+    '    if [ -n "$path" ] && [ -e "$path" ] '
+    '&& ! git ls-files --error-unmatch "$path" >/dev/null 2>&1; then rm -f "$path"; fi; '
+    '  done < <(git diff --name-only HEAD "$upstream" 2>/dev/null || true); '
+    "fi; "
+    "git clean -f uv.lock 2>/dev/null || true"
+)
+
+
+def build_git_pull_command(
+    repo_dir: str,
+    github_token: str | None = None,
+    github_username: str = "JinnanDuan",
+) -> str:
+    parts = [
+        f"cd {repo_dir}",
+        "GIT_TERMINAL_PROMPT=0",
+        _git_with_auth("fetch --prune", github_token, github_username),
+        _GIT_PULL_PRE_CLEAN,
+        _git_with_auth("merge --ff-only", github_token, github_username),
+    ]
     return " && ".join(parts)
 
 

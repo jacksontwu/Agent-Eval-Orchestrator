@@ -93,7 +93,9 @@ def test_resolve_paths_missing_shared_root(updater):
 def test_build_git_pull_command_without_token():
     cmd = build_git_pull_command("/home/djn/worker/harbor")
     assert "GIT_TERMINAL_PROMPT=0" in cmd
-    assert "git pull --ff-only" in cmd
+    assert "git fetch --prune" in cmd
+    assert "git merge --ff-only" in cmd
+    assert "git clean -f uv.lock" in cmd
     assert "AEO_GITHUB_TOKEN" not in cmd
 
 
@@ -102,7 +104,9 @@ def test_build_git_pull_command_with_token():
     assert "username=JinnanDuan" in cmd
     assert "password='ghp_secret'" in cmd or "password=ghp_secret" in cmd
     assert "credential.helper" in cmd
-    assert "pull --ff-only" in cmd
+    assert "fetch --prune" in cmd
+    assert "merge --ff-only" in cmd
+    assert "git clean -f uv.lock" in cmd
     assert "AEO_GITHUB_TOKEN" not in cmd
 
 
@@ -203,7 +207,7 @@ def test_run_job_success(updater, store, monkeypatch):
     )
 
     joined = "\n".join(ssh_commands)
-    assert "git pull" in joined
+    assert "git merge --ff-only" in joined
     assert "uv sync" in joined or ".local/bin/uv sync" in joined
     assert "agent_eval_orchestrator.worker.daemon" in joined
     job = store.get_worker_update_job(job_id)
@@ -216,7 +220,7 @@ def test_run_job_git_pull_failure(updater, store, monkeypatch):
     def fake_ssh_run(alias, remote, **kwargs):
         ssh_commands.append(remote)
         result = MagicMock()
-        if "git pull" in remote:
+        if "git merge --ff-only" in remote:
             result.returncode = 1
             result.stdout = ""
             result.stderr = "CONFLICT"
