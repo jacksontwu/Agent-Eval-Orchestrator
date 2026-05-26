@@ -77,6 +77,8 @@ confirm() {
 }
 
 # --- cli ---
+BOOTSTRAP_MODE="${BOOTSTRAP_MODE:-full}"
+
 parse_bootstrap_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -84,11 +86,17 @@ parse_bootstrap_args() {
         INTERACTIVE="no"
         shift
         ;;
+      --configure-docker)
+        BOOTSTRAP_MODE="configure-docker"
+        shift
+        ;;
       -h|--help)
         cat <<'EOF'
-Usage: bash scripts/bootstrap-huawei-worker.sh [--yes]
+Usage: bash scripts/bootstrap-huawei-worker.sh [--yes] [--configure-docker]
 
-  --yes   Non-interactive mode. Requires DJN_PASSWORD when setting djn password.
+  --yes               Non-interactive mode. Requires DJN_PASSWORD when setting djn password.
+  --configure-docker  Update Docker daemon.json address pools on an existing worker.
+                      Run as djn (docker group); does not require root SSH.
 EOF
         exit 0
         ;;
@@ -232,6 +240,11 @@ render_daemon_json() {
 {
   "registry-mirrors": [
     "${SWR_MIRROR}"
+  ],
+  "default-address-pools": [
+    {"base": "10.201.0.0/16", "size": 24},
+    {"base": "10.202.0.0/16", "size": 24},
+    {"base": "10.203.0.0/16", "size": 24}
   ]
 }
 EOF
@@ -245,6 +258,63 @@ write_daemon_json() {
   render_daemon_json > "${DOCKER_DAEMON_JSON}"
   chmod 644 "${DOCKER_DAEMON_JSON}"
   log "Wrote ${DOCKER_DAEMON_JSON}"
+}
+
+require_docker_cli() {
+  command -v docker >/dev/null 2>&1 || die "docker not available"
+  docker info >/dev/null 2>&1 || die "docker not reachable; ensure the current user is in the docker group"
+}
+
+backup_daemon_json_via_docker() {
+  local backup="/etc/docker/daemon.json.bak.$(timestamp_suffix)"
+  docker run --rm -v /etc/docker:/etc/docker alpine \
+    sh -c "test -f /etc/docker/daemon.json && cp /etc/docker/daemon.json '${backup}' || true"
+  log "Backed up /etc/docker/daemon.json -> ${backup}"
+}
+
+write_daemon_json_via_docker() {
+  local tmp
+  tmp="$(mktemp)"
+  render_daemon_json > "${tmp}"
+  docker run --rm -v /etc/docker:/etc/docker -v "${tmp}:/src/daemon.json:ro" alpine \
+    sh -c 'cp /src/daemon.json /etc/docker/daemon.json'
+  rm -f "${tmp}"
+  log "Wrote ${DOCKER_DAEMON_JSON} via docker mount"
+}
+
+restart_docker_via_nsenter() {
+  # Restarting dockerd drops the client connection; that is expected.
+  docker run --rm --privileged --pid=host -v /:/host alpine \
+    nsenter -t 1 -m -u -i -n -p -- systemctl restart docker >/dev/null 2>&1 || true
+
+  for _ in $(seq 1 30); do
+    if docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  die "Docker did not become ready after restart"
+}
+
+verify_docker_address_pools() {
+  docker version >/dev/null
+  docker compose version >/dev/null
+  docker info | grep -F "${SWR_MIRROR}" >/dev/null
+  docker system info --format 'DefaultAddressPools={{json .DefaultAddressPools}}' | grep -F '"Base":"10.201.0.0/16"' >/dev/null
+  log "Docker address pool verification passed"
+}
+
+configure_docker_address_pools() {
+  confirm "Prune unused Docker networks, rewrite daemon.json, and restart Docker?"
+  require_docker_cli
+  log "Pruning unused Docker networks"
+  docker network prune -f
+  backup_daemon_json_via_docker
+  write_daemon_json_via_docker
+  log "Restarting Docker"
+  restart_docker_via_nsenter
+  verify_docker_address_pools
+  log "Network count: $(docker network ls | wc -l)"
 }
 
 remove_legacy_docker_packages() {
@@ -278,10 +348,7 @@ configure_docker_service() {
 }
 
 verify_docker_installation() {
-  docker version >/dev/null
-  docker compose version >/dev/null
-  docker info | grep -F "${SWR_MIRROR}" >/dev/null
-  log "Docker verification passed"
+  verify_docker_address_pools
 }
 
 setup_docker() {
@@ -394,13 +461,23 @@ print_bootstrap_success() {
 # --- main ---
 main() {
   parse_bootstrap_args "$@"
-  run_preflight_checks
-  setup_djn_account
-  apply_ssh_hardening
-  install_base_packages
-  setup_docker
-  run_djn_phase
-  print_bootstrap_success
+  case "${BOOTSTRAP_MODE}" in
+    configure-docker)
+      configure_docker_address_pools
+      ;;
+    full)
+      run_preflight_checks
+      setup_djn_account
+      apply_ssh_hardening
+      install_base_packages
+      setup_docker
+      run_djn_phase
+      print_bootstrap_success
+      ;;
+    *)
+      die "Unknown bootstrap mode: ${BOOTSTRAP_MODE}"
+      ;;
+  esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
