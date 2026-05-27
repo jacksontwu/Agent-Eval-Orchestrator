@@ -93,12 +93,31 @@ def _iter_trial_dirs(job_dir: Path) -> list[Path]:
     )
 
 
+def _trial_case_id(trial_dir: Path) -> str:
+    result_path = trial_dir / "result.json"
+    if result_path.exists():
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        trial_name = str(payload.get("trial_name") or trial_dir.name).strip()
+    else:
+        trial_name = trial_dir.name
+    if "__" not in trial_name:
+        return trial_name
+    candidate = trial_name.rsplit("__", 1)[0].strip()
+    return candidate or trial_name
+
+
+def _remove_matching_trial_dirs(target_job_dir: Path, case_id: str) -> None:
+    for existing in _iter_trial_dirs(target_job_dir):
+        if _trial_case_id(existing) == case_id:
+            shutil.rmtree(existing)
+
+
 def _copy_trial_dirs(source_job_dir: Path, target_job_dir: Path) -> None:
+    target_job_dir.mkdir(parents=True, exist_ok=True)
     for trial_dir in _iter_trial_dirs(source_job_dir):
-        target_trial_dir = target_job_dir / trial_dir.name
-        if target_trial_dir.exists():
-            shutil.rmtree(target_trial_dir)
-        shutil.copytree(trial_dir, target_trial_dir)
+        case_id = _trial_case_id(trial_dir)
+        _remove_matching_trial_dirs(target_job_dir, case_id)
+        shutil.copytree(trial_dir, target_job_dir / trial_dir.name)
 
 
 def _write_merged_job(
