@@ -18,22 +18,12 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from agent_eval_orchestrator.core.defaults import (
-    CLAUDE_CODE_AGENT_NAME,
-    CLAUDE_CODE_OMITTED_AGENT_KWARGS,
-    DEFAULT_AGENT_TIMEOUT_MULTIPLIER,
-    DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER,
-    DEFAULT_ENVIRONMENT_DELETE,
-    DEFAULT_ENVIRONMENT_FORCE_BUILD,
     DEFAULT_HARBOR_REPO,
     DEFAULT_HOST,
-    DEFAULT_MAX_RETRIES,
     DEFAULT_PER_WORKER_CONCURRENCY,
     DEFAULT_PORT,
     DEFAULT_PRESET_DATASETS,
-    DEFAULT_TIMEOUT_MULTIPLIER,
-    DEFAULT_VERIFIER_TIMEOUT_MULTIPLIER,
 )
-from agent_eval_orchestrator.core.worker_paths import build_harbor_bind_mounts, default_bitfun_config_dir
 from agent_eval_orchestrator.core.ids import new_id, now_iso, sanitize_name
 from agent_eval_orchestrator.controller.asset_syncer import (
     AssetSyncer,
@@ -56,7 +46,6 @@ from agent_eval_orchestrator.storage.store import Store
 
 GLOBAL_VIEWER_PORT = 7369
 DEFAULT_OWNER = "demo"
-DEFAULT_AGENT_NAME = "bitfun-cli"
 DEFAULT_JOBS_DIR = DEFAULT_HARBOR_REPO / "jobs"
 DEFAULT_IMPORTED_JOBS_DIRNAME = "imported-jobs"
 
@@ -145,220 +134,6 @@ def _job_sources_for_run(
     if sources:
         grouped_sources[merged_job_name] = sources
     return list(grouped_sources.items())
-
-
-def _worker_shared_root(worker: dict[str, object] | None) -> str:
-    if not worker:
-        return ""
-    capabilities = worker.get("capabilities") if isinstance(worker.get("capabilities"), dict) else {}
-    return str(capabilities.get("sharedRoot") or "").strip()
-
-
-def _worker_repo_root(worker: dict[str, object] | None) -> Path | None:
-    shared_root = _worker_shared_root(worker)
-    if not shared_root:
-        return None
-    from agent_eval_orchestrator.core.worker_paths import repo_root_from_shared_root
-
-    return repo_root_from_shared_root(shared_root)
-
-
-def _map_dataset_for_worker(dataset_ref: str, worker: dict[str, object] | None) -> str:
-    dataset_path = Path(dataset_ref).expanduser().resolve()
-    repo_root = Path("/root/projects/agent-eval-orchestrator").resolve()
-    worker_root = _worker_repo_root(worker)
-    if worker_root and _is_subpath(dataset_path, repo_root):
-        return str(worker_root / dataset_path.relative_to(repo_root))
-    return str(dataset_path)
-
-
-def _default_harbor_for_worker(worker_id: str, worker: dict[str, object] | None) -> str:
-    from agent_eval_orchestrator.core.worker_paths import default_harbor_repo_from_shared_root
-
-    shared_root = _worker_shared_root(worker)
-    if shared_root:
-        harbor_path = default_harbor_repo_from_shared_root(shared_root)
-        if harbor_path:
-            return str(harbor_path)
-    if worker_id == "remote-a":
-        return "/home/wt/harbor"
-    return str(DEFAULT_HARBOR_REPO)
-
-
-def _default_uv_for_worker(worker_id: str, worker: dict[str, object] | None) -> str:
-    from agent_eval_orchestrator.core.worker_paths import default_uv_binary_from_shared_root
-
-    if worker_id == "local-a":
-        return "/root/.local/bin/uv"
-    shared_root = _worker_shared_root(worker)
-    if shared_root:
-        uv_path = default_uv_binary_from_shared_root(shared_root)
-        if uv_path:
-            return str(uv_path)
-    if worker_id == "remote-a":
-        return "/home/wt/.local/bin/uv"
-    return "/root/.local/bin/uv"
-
-
-def _default_bitfun_mounts(worker_id: str, worker: dict[str, object] | None) -> list[dict[str, object]]:
-    shared_root = _worker_shared_root(worker)
-    harbor_repo = _default_harbor_for_worker(worker_id, worker)
-    uv_binary = _default_uv_for_worker(worker_id, worker)
-    bitfun_config = default_bitfun_config_dir(worker_id=worker_id, shared_root=shared_root or None)
-    return build_harbor_bind_mounts(
-        uv_binary=uv_binary,
-        harbor_repo=harbor_repo,
-        bitfun_config_dir=bitfun_config,
-    )
-
-
-def _normalize_claude_code_executor_config(config: dict[str, object]) -> dict[str, object]:
-    if str(config.get("agentName") or "") != CLAUDE_CODE_AGENT_NAME:
-        return config
-    config["maxRetries"] = DEFAULT_MAX_RETRIES
-    agent_kwargs = config.get("agentKwargs")
-    if isinstance(agent_kwargs, dict):
-        config["agentKwargs"] = {
-            key: value
-            for key, value in agent_kwargs.items()
-            if key not in CLAUDE_CODE_OMITTED_AGENT_KWARGS
-        }
-    agent_kwargs_by_worker = config.get("agentKwargsByWorker")
-    if isinstance(agent_kwargs_by_worker, dict):
-        config["agentKwargsByWorker"] = {
-            worker_id: {
-                key: value
-                for key, value in worker_kwargs.items()
-                if key not in CLAUDE_CODE_OMITTED_AGENT_KWARGS
-            }
-            for worker_id, worker_kwargs in agent_kwargs_by_worker.items()
-            if isinstance(worker_kwargs, dict)
-        }
-    return config
-
-
-def _build_executor_config(
-    *,
-    dataset_ref: str,
-    worker_ids: list[str],
-    workers: list[dict[str, object]],
-    body_config: dict[str, object],
-    jobs_dir: str,
-) -> dict[str, object]:
-    workers_by_id = {str(worker["worker_id"]): worker for worker in workers}
-    harbor_repo_by_worker: dict[str, str] = {}
-    dataset_path_by_worker: dict[str, str] = {}
-    uv_binary_by_worker: dict[str, str] = {}
-    mounts_by_worker: dict[str, list[dict[str, object]]] = {}
-    for worker_id in worker_ids:
-        worker = workers_by_id.get(worker_id)
-        harbor_repo_by_worker[worker_id] = _default_harbor_for_worker(worker_id, worker)
-        dataset_path_by_worker[worker_id] = _map_dataset_for_worker(dataset_ref, worker)
-        uv_binary_by_worker[worker_id] = _default_uv_for_worker(worker_id, worker)
-        mounts_by_worker[worker_id] = _default_bitfun_mounts(worker_id, worker)
-    n_concurrent = int(body_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
-    timeout_multiplier = body_config.get("timeoutMultiplier")
-    agent_timeout_multiplier = body_config.get("agentTimeoutMultiplier")
-    verifier_timeout_multiplier = body_config.get("verifierTimeoutMultiplier")
-    agent_setup_timeout_multiplier = body_config.get("agentSetupTimeoutMultiplier")
-    environment_build_timeout_multiplier = body_config.get("environmentBuildTimeoutMultiplier")
-    config = {
-        "agentName": str(body_config.get("agentName") or DEFAULT_AGENT_NAME),
-        "envType": str(body_config.get("envType") or "docker"),
-        "nConcurrent": n_concurrent,
-        "timeoutMultiplier": (
-            float(timeout_multiplier) if timeout_multiplier not in (None, "") else DEFAULT_TIMEOUT_MULTIPLIER
-        ),
-        "agentTimeoutMultiplier": (
-            float(agent_timeout_multiplier)
-            if agent_timeout_multiplier not in (None, "")
-            else DEFAULT_AGENT_TIMEOUT_MULTIPLIER
-        ),
-        "verifierTimeoutMultiplier": (
-            float(verifier_timeout_multiplier)
-            if verifier_timeout_multiplier not in (None, "")
-            else DEFAULT_VERIFIER_TIMEOUT_MULTIPLIER
-        ),
-        "agentSetupTimeoutMultiplier": (
-            float(agent_setup_timeout_multiplier) if agent_setup_timeout_multiplier not in (None, "") else None
-        ),
-        "environmentBuildTimeoutMultiplier": (
-            float(environment_build_timeout_multiplier)
-            if environment_build_timeout_multiplier not in (None, "")
-            else DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER
-        ),
-        "maxRetries": (
-            int(body_config["maxRetries"])
-            if body_config.get("maxRetries") not in (None, "")
-            else DEFAULT_MAX_RETRIES
-        ),
-        "environmentForceBuild": (
-            bool(body_config["environmentForceBuild"])
-            if "environmentForceBuild" in body_config
-            else DEFAULT_ENVIRONMENT_FORCE_BUILD
-        ),
-        "environmentDelete": (
-            bool(body_config["environmentDelete"])
-            if "environmentDelete" in body_config
-            else DEFAULT_ENVIRONMENT_DELETE
-        ),
-        "harborRepoPathByWorker": harbor_repo_by_worker,
-        "datasetPathByWorker": dataset_path_by_worker,
-        "uvBinaryByWorker": uv_binary_by_worker,
-        "mountsByWorker": mounts_by_worker,
-        "collectJobs": True,
-        "combinedJobsDir": jobs_dir,
-    }
-    for key in (
-        "modelName",
-        "modelNameByWorker",
-        "agentKwargs",
-        "agentKwargsByWorker",
-        "agentEnv",
-        "agentEnvByWorker",
-        "processEnv",
-        "processEnvByWorker",
-        "extraArgs",
-        "harborRepoPath",
-        "datasetPath",
-        "uvBinary",
-        "mounts",
-    ):
-        if key in body_config and body_config[key] is not None:
-            config[key] = body_config[key]
-    return _normalize_claude_code_executor_config(config)
-
-
-def _build_asset_sync_executor_config(
-    *,
-    worker_ids: list[str],
-    workers: list[dict[str, object]],
-    body_config: dict[str, object],
-    jobs_dir: str,
-) -> dict[str, object]:
-    workers_by_id = {str(worker["worker_id"]): worker for worker in workers}
-    harbor_repo_by_worker = {
-        worker_id: _default_harbor_for_worker(worker_id, workers_by_id.get(worker_id))
-        for worker_id in worker_ids
-    }
-    uv_binary_by_worker = {
-        worker_id: _default_uv_for_worker(worker_id, workers_by_id.get(worker_id))
-        for worker_id in worker_ids
-    }
-    return {
-        **_build_executor_config(
-            dataset_ref="",
-            worker_ids=worker_ids,
-            workers=workers,
-            body_config=body_config,
-            jobs_dir=jobs_dir,
-        ),
-        "useAssetSync": True,
-        "datasetPathByWorker": {},
-        "mountsByWorker": {},
-        "harborRepoPathByWorker": harbor_repo_by_worker,
-        "uvBinaryByWorker": uv_binary_by_worker,
-    }
 
 
 def _validate_controller_internal_ip(value: str) -> bool:
