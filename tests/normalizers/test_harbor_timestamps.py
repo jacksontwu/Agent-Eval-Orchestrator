@@ -5,11 +5,12 @@ from pathlib import Path
 import pytest
 
 from agent_eval_orchestrator.normalizers.harbor_timestamps import (
+    normalize_job_result_file,
     normalize_job_result_payload,
     normalize_jobs_dir,
     to_harbor_naive_utc_iso,
 )
-from agent_eval_orchestrator.controller.server import _write_merged_job
+from agent_eval_orchestrator.normalizers.harbor_job_merge import write_merged_job
 
 
 @pytest.mark.unit
@@ -52,7 +53,27 @@ def test_normalize_jobs_dir_updates_mixed_timezone_jobs(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_write_merged_job_uses_naive_utc_timestamps(tmp_path: Path) -> None:
+def test_write_merged_job_uses_naive_utc_timestamps(tmp_path: Path, monkeypatch) -> None:
+    from agent_eval_orchestrator.normalizers import harbor_job_merge
+
+    def _fake_finalize(*, job_dir: Path, harbor_repo=None) -> None:
+        (job_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "id": "job-1",
+                    "started_at": "2026-05-25T08:56:31.915412Z",
+                    "updated_at": "2026-05-25T09:00:00.915412Z",
+                    "finished_at": "2026-05-25T09:00:00.915412Z",
+                    "n_total_trials": 1,
+                    "stats": {"n_completed_trials": 1},
+                }
+            ),
+            encoding="utf-8",
+        )
+        normalize_job_result_file(job_dir / "result.json")
+
+    monkeypatch.setattr(harbor_job_merge, "finalize_job_result_with_harbor", _fake_finalize)
+
     source_job = tmp_path / "source"
     source_job.mkdir()
     trial_dir = source_job / "trial-a"
@@ -75,7 +96,7 @@ def test_write_merged_job_uses_naive_utc_timestamps(tmp_path: Path) -> None:
     )
 
     merged_job = tmp_path / "merged"
-    _write_merged_job(
+    write_merged_job(
         merged_job_dir=merged_job,
         merged_job_name="merged",
         source_job_dirs=[source_job],

@@ -7,13 +7,11 @@ import io
 import ipaddress
 import json
 import os
-from math import fsum
 from pathlib import Path
 import shutil
 import subprocess
 import tarfile
 import time
-from uuid import uuid4
 from urllib import error, request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -42,13 +40,8 @@ from agent_eval_orchestrator.controller.asset_syncer import (
     validate_create_task_assets,
 )
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
-from agent_eval_orchestrator.normalizers.harbor_timestamps import (
-    normalize_job_result_payload,
-    normalize_jobs_dir,
-    normalize_timestamp_value,
-    parse_harbor_timestamp,
-    to_harbor_naive_utc_iso,
-)
+from agent_eval_orchestrator.normalizers.harbor_job_merge import copy_trial_dirs, write_merged_job
+from agent_eval_orchestrator.normalizers.harbor_timestamps import normalize_jobs_dir
 from agent_eval_orchestrator.controller.provisioner import Provisioner
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator, RerunValidationError
 from agent_eval_orchestrator.controller.worker_updater import WorkerUpdater
@@ -83,195 +76,35 @@ def _safe_extract_tar(archive: bytes, target_dir: Path) -> None:
         tar.extractall(target_dir)
 
 
-def _iter_trial_dirs(job_dir: Path) -> list[Path]:
-    if not job_dir.exists():
-        return []
-    return sorted(
-        child
-        for child in job_dir.iterdir()
-        if child.is_dir() and (child / "result.json").exists()
-    )
-
-
-def _trial_case_id(trial_dir: Path) -> str:
-    result_path = trial_dir / "result.json"
-    if result_path.exists():
-        payload = json.loads(result_path.read_text(encoding="utf-8"))
-        trial_name = str(payload.get("trial_name") or trial_dir.name).strip()
-    else:
-        trial_name = trial_dir.name
-    if "__" not in trial_name:
-        return trial_name
-    candidate = trial_name.rsplit("__", 1)[0].strip()
-    return candidate or trial_name
-
-
-def _remove_matching_trial_dirs(target_job_dir: Path, case_id: str) -> None:
-    for existing in _iter_trial_dirs(target_job_dir):
-        if _trial_case_id(existing) == case_id:
-            shutil.rmtree(existing)
-
-
-def _copy_trial_dirs(source_job_dir: Path, target_job_dir: Path) -> None:
-    target_job_dir.mkdir(parents=True, exist_ok=True)
-    for trial_dir in _iter_trial_dirs(source_job_dir):
-        case_id = _trial_case_id(trial_dir)
-        _remove_matching_trial_dirs(target_job_dir, case_id)
-        shutil.copytree(trial_dir, target_job_dir / trial_dir.name)
-
-
-def _write_merged_job(
+def _rebuild_merged_job_for_run(
     *,
-    merged_job_dir: Path,
-    merged_job_name: str,
-    source_job_dirs: list[Path],
+    store: Store,
+    run_id: str,
+    jobs_dir: Path,
 ) -> None:
-    merged_job_dir.mkdir(parents=True, exist_ok=True)
-
-    config_payload: dict[str, object] | None = None
-    for source_job_dir in source_job_dirs:
-        config_path = source_job_dir / "config.json"
-        if config_payload is None and config_path.exists():
-            config_payload = json.loads(config_path.read_text())
-        _copy_trial_dirs(source_job_dir, merged_job_dir)
-
-    if config_payload is None:
-        raise RuntimeError("no job config found while merging Harbor jobs")
-
-    config_payload["job_name"] = merged_job_name
-    config_payload["jobs_dir"] = str(merged_job_dir.parent)
-    (merged_job_dir / "config.json").write_text(
-        json.dumps(config_payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    grouped_sources = _job_sources_for_run(
+        store=store,
+        run_id=run_id,
+        jobs_dir=jobs_dir,
     )
-
-    trial_payloads = [
-        json.loads((trial_dir / "result.json").read_text(encoding="utf-8"))
-        for trial_dir in _iter_trial_dirs(merged_job_dir)
-    ]
-    if not trial_payloads:
-        raise RuntimeError("no Harbor trial results found while merging jobs")
-
-    evals: dict[str, dict[str, object]] = {}
-    n_input_tokens: int | None = 0
-    n_cache_tokens: int | None = 0
-    n_output_tokens: int | None = 0
-    cost_usd: float | None = 0.0
-    n_errored_trials = 0
-    n_cancelled_trials = 0
-
-    def _sum_optional_int(current: int | None, value: object) -> int | None:
-        if value is None:
-            return current
-        if not isinstance(value, int):
-            return current
-        return (current or 0) + value
-
-    def _sum_optional_float(current: float | None, value: object) -> float | None:
-        if value is None:
-            return current
-        if not isinstance(value, (float, int)):
-            return current
-        return float((current or 0.0) + float(value))
-
-    for trial in trial_payloads:
-        agent_info = trial.get("agent_info") or {}
-        agent_name = str(agent_info.get("name") or "unknown")
-        model_info = agent_info.get("model_info") or {}
-        model_name = str(model_info.get("name") or "").strip()
-        source = str(trial.get("source") or "adhoc")
-        eval_key = f"{agent_name}__{model_name}__{source}" if model_name else f"{agent_name}__{source}"
-        eval_stats = evals.setdefault(
-            eval_key,
-            {
-                "n_trials": 0,
-                "n_errors": 0,
-                "metrics": [],
-                "pass_at_k": {},
-                "reward_stats": {},
-                "exception_stats": {},
-            },
-        )
-        rewards = ((trial.get("verifier_result") or {}).get("rewards") or {})
-        if isinstance(rewards, dict) and rewards:
-            eval_stats["n_trials"] = int(eval_stats["n_trials"]) + 1
-            reward_stats = eval_stats["reward_stats"]
-            for reward_key, reward_value in rewards.items():
-                bucket = reward_stats.setdefault(str(reward_key), {})
-                bucket.setdefault(str(reward_value), []).append(str(trial.get("trial_name") or "unknown"))
-        exception_info = trial.get("exception_info") or {}
-        if exception_info:
-            n_errored_trials += 1
-            exception_type = str(exception_info.get("exception_type") or "UnknownError")
-            eval_stats["n_errors"] = int(eval_stats["n_errors"]) + 1
-            exception_stats = eval_stats["exception_stats"]
-            exception_stats.setdefault(exception_type, []).append(str(trial.get("trial_name") or "unknown"))
-            if exception_type == "CancelledError":
-                n_cancelled_trials += 1
-
-        agent_result = trial.get("agent_result") or {}
-        n_input_tokens = _sum_optional_int(n_input_tokens, agent_result.get("n_input_tokens"))
-        n_cache_tokens = _sum_optional_int(n_cache_tokens, agent_result.get("n_cache_tokens"))
-        n_output_tokens = _sum_optional_int(n_output_tokens, agent_result.get("n_output_tokens"))
-        cost_usd = _sum_optional_float(cost_usd, agent_result.get("cost_usd"))
-
-    for eval_stats in evals.values():
-        reward_stats = eval_stats["reward_stats"]
-        metric_entries: list[dict[str, float]] = []
-        for reward_key, buckets in reward_stats.items():
-            values: list[float] = []
-            for bucket_value, trial_names in buckets.items():
-                try:
-                    values.extend([float(bucket_value)] * len(trial_names))
-                except ValueError:
-                    continue
-            if values:
-                metric_entries.append({"mean": fsum(values) / len(values)})
-        eval_stats["metrics"] = metric_entries
-
-    started_values = [
-        parse_harbor_timestamp(str(trial["started_at"]))
-        for trial in trial_payloads
-        if trial.get("started_at")
-    ]
-    finished_values = [
-        parse_harbor_timestamp(str(trial["finished_at"]))
-        for trial in trial_payloads
-        if trial.get("finished_at")
-    ]
-    updated_values = finished_values or started_values
-    job_result = normalize_job_result_payload(
-        {
-            "id": str(uuid4()),
-            "started_at": to_harbor_naive_utc_iso(min(started_values))
-            if started_values
-            else normalize_timestamp_value(now_iso()),
-            "updated_at": to_harbor_naive_utc_iso(max(updated_values))
-            if updated_values
-            else normalize_timestamp_value(now_iso()),
-            "finished_at": to_harbor_naive_utc_iso(max(finished_values))
-            if len(finished_values) == len(trial_payloads)
-            else None,
-            "n_total_trials": len(trial_payloads),
-            "stats": {
-                "n_completed_trials": len(trial_payloads),
-                "n_errored_trials": n_errored_trials,
-                "n_running_trials": 0,
-                "n_pending_trials": 0,
-                "n_cancelled_trials": n_cancelled_trials,
-                "n_retries": 0,
-                "evals": evals,
-                "n_input_tokens": n_input_tokens,
-                "n_cache_tokens": n_cache_tokens,
-                "n_output_tokens": n_output_tokens,
-                "cost_usd": cost_usd,
-            },
-        }
-    )
-    (merged_job_dir / "result.json").write_text(
-        json.dumps(job_result, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    for merged_job_name, source_job_dirs in grouped_sources:
+        merged_job_dir = jobs_dir / merged_job_name
+        if merged_job_dir.exists():
+            shutil.rmtree(merged_job_dir)
+        try:
+            write_merged_job(
+                merged_job_dir=merged_job_dir,
+                merged_job_name=merged_job_name,
+                source_job_dirs=source_job_dirs,
+            )
+        except RuntimeError:
+            if merged_job_dir.exists():
+                shutil.rmtree(merged_job_dir)
+            continue
+        for batch in store.list_batches_for_run(run_id):
+            legacy_batch_dir = jobs_dir / str(batch["batch_id"])
+            if legacy_batch_dir.exists() and legacy_batch_dir != merged_job_dir:
+                shutil.rmtree(legacy_batch_dir)
 
 
 def _job_sources_for_run(
@@ -560,25 +393,17 @@ class Handler(BaseHTTPRequestHandler):
                 run_id=str(run["run_id"]),
                 jobs_dir=jobs_dir,
             )
-            for merged_job_name, source_job_dirs in grouped_sources:
-                merged_job_dir = jobs_dir / merged_job_name
-                if merged_job_dir.exists():
-                    shutil.rmtree(merged_job_dir)
-                try:
-                    _write_merged_job(
-                        merged_job_dir=merged_job_dir,
-                        merged_job_name=merged_job_name,
-                        source_job_dirs=source_job_dirs,
-                    )
-                except RuntimeError:
-                    if merged_job_dir.exists():
-                        shutil.rmtree(merged_job_dir)
-                    continue
-                merged_names.append(merged_job_name)
-                for batch in self.store.list_batches_for_run(str(run["run_id"])):
-                    legacy_batch_dir = jobs_dir / str(batch["batch_id"])
-                    if legacy_batch_dir.exists() and legacy_batch_dir != merged_job_dir:
-                        shutil.rmtree(legacy_batch_dir)
+            if not grouped_sources:
+                continue
+            try:
+                _rebuild_merged_job_for_run(
+                    store=self.store,
+                    run_id=str(run["run_id"]),
+                    jobs_dir=jobs_dir,
+                )
+            except RuntimeError:
+                continue
+            merged_names.extend(name for name, _ in grouped_sources)
         return merged_names
 
     def _ensure_global_harbor_viewer(self) -> dict[str, object]:
@@ -1100,30 +925,15 @@ class Handler(BaseHTTPRequestHandler):
                 _safe_extract_tar(archive, imported_root)
                 batch = self.store.get_batch(batch_id)
                 if batch:
-                    run = self.store.get_run(str(batch["run_id"]))
-                    if run:
-                        merged_job_name = sanitize_name(str(run["display_name"]))
-                        source_job_dirs = [
-                            source
-                            for _, sources in _job_sources_for_run(
-                                store=self.store,
-                                run_id=str(run["run_id"]),
-                                jobs_dir=jobs_dir,
-                            )
-                            for source in sources
-                        ]
-                        if source_job_dirs:
-                            merged_job_dir = jobs_dir / merged_job_name
-                            if merged_job_dir.exists():
-                                shutil.rmtree(merged_job_dir)
-                            _write_merged_job(
-                                merged_job_dir=merged_job_dir,
-                                merged_job_name=merged_job_name,
-                                source_job_dirs=source_job_dirs,
-                            )
-                            legacy_batch_dir = jobs_dir / batch_id
-                            if legacy_batch_dir.exists():
-                                shutil.rmtree(legacy_batch_dir)
+                    try:
+                        _rebuild_merged_job_for_run(
+                            store=self.store,
+                            run_id=str(batch["run_id"]),
+                            jobs_dir=jobs_dir,
+                        )
+                    except RuntimeError as exc:
+                        _json_response(self, {"error": str(exc)}, 500)
+                        return
                 _json_response(self, {"ok": True, "batchId": batch_id, "jobsDir": str(jobs_dir)})
             except KeyError as exc:
                 _json_response(self, {"error": f"missing field: {exc}"}, 400)
@@ -1524,8 +1334,26 @@ class Handler(BaseHTTPRequestHandler):
                         rerun_job_dir = Path(str(batch_row["batch_root"])) / "harbor" / "jobs" / str(body["batchId"])
                         if rerun_job_dir.exists():
                             parent_job_dir.mkdir(parents=True, exist_ok=True)
-                            _copy_trial_dirs(rerun_job_dir, parent_job_dir)
+                            copy_trial_dirs(rerun_job_dir, parent_job_dir)
                     self.store.finish_rerun_batch_if_complete(rerun_batch_id=str(body["batchId"]))
+                    run_row = self.store.get_run(str(batch_row["run_id"]))
+                    if run_row and str(run_row.get("rerun_status") or "") in {"succeeded", "failed"}:
+                        metadata = (
+                            body.get("executorMetadata")
+                            if isinstance(body.get("executorMetadata"), dict)
+                            else {}
+                        )
+                        jobs_dir = Path(
+                            str(metadata.get("combinedJobsDir") or DEFAULT_JOBS_DIR)
+                        ).expanduser().resolve()
+                        try:
+                            _rebuild_merged_job_for_run(
+                                store=self.store,
+                                run_id=str(batch_row["run_id"]),
+                                jobs_dir=jobs_dir,
+                            )
+                        except RuntimeError:
+                            pass
             if self.asset_syncer is not None:
                 batch_row = self.store.get_batch(str(body["batchId"]))
                 if batch_row and self.store.is_run_terminal(str(batch_row["run_id"])):

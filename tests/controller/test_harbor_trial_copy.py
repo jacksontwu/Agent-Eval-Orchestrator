@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_eval_orchestrator.controller.server import _copy_trial_dirs
+from agent_eval_orchestrator.normalizers.harbor_job_merge import copy_trial_dirs
 
 
 def _write_trial(job_dir: Path, trial_name: str) -> None:
@@ -29,7 +29,7 @@ def test_copy_trial_dirs_replaces_prior_trial_with_same_case_id(tmp_path: Path) 
     _write_trial(parent_job_dir, "other__case__keep")
     _write_trial(rerun_job_dir, new_trial)
 
-    _copy_trial_dirs(rerun_job_dir, parent_job_dir)
+    copy_trial_dirs(rerun_job_dir, parent_job_dir)
 
     remaining = {child.name for child in parent_job_dir.iterdir() if child.is_dir()}
     assert remaining == {"other__case__keep", new_trial}
