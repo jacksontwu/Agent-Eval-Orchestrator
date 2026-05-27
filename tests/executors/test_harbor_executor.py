@@ -98,3 +98,44 @@ def test_prepare_applies_default_environment_flags_when_config_omits_them(tmp_pa
     shell = prepared.command[2]
     assert "--no-force-build" in shell
     assert "--no-delete" in shell
+
+
+def test_prepare_claude_code_normalizes_retries_and_agent_kwargs(tmp_path: Path) -> None:
+    batch_root = tmp_path / "batch-root"
+    batch_root.mkdir()
+    dataset = tmp_path / "dataset" / "case-a"
+    dataset.mkdir(parents=True)
+
+    harbor_repo = tmp_path / "harbor"
+    harbor_repo.mkdir()
+
+    prepared = HarborExecutor().prepare(
+        batch={
+            "batch_id": "batch-test",
+            "batch_root": str(batch_root),
+            "selected_case_ids": ["case-a"],
+        },
+        run={},
+        template={},
+        dataset_ref=str(dataset.parent),
+        executor_config={
+            "agentName": "claude-code",
+            "envType": "docker",
+            "nConcurrent": 1,
+            "maxRetries": 0,
+            "agentKwargs": {
+                "version": "2.1.152",
+                "max_turns": 80,
+                "thinking": "disabled",
+            },
+            "harborRepoPath": str(harbor_repo),
+        },
+        local_root=tmp_path / "local",
+        shared_root=None,
+    )
+
+    shell = prepared.command[2]
+    assert "--max-retries 3" in shell
+    assert "--ak version=2.1.152" in shell
+    assert "--ak max_turns=80" not in shell
+    assert "--ak thinking=disabled" not in shell

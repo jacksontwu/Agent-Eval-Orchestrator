@@ -18,6 +18,8 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from agent_eval_orchestrator.core.defaults import (
+    CLAUDE_CODE_AGENT_NAME,
+    CLAUDE_CODE_OMITTED_AGENT_KWARGS,
     DEFAULT_AGENT_TIMEOUT_MULTIPLIER,
     DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER,
     DEFAULT_ENVIRONMENT_DELETE,
@@ -209,6 +211,31 @@ def _default_bitfun_mounts(worker_id: str, worker: dict[str, object] | None) -> 
     )
 
 
+def _normalize_claude_code_executor_config(config: dict[str, object]) -> dict[str, object]:
+    if str(config.get("agentName") or "") != CLAUDE_CODE_AGENT_NAME:
+        return config
+    config["maxRetries"] = DEFAULT_MAX_RETRIES
+    agent_kwargs = config.get("agentKwargs")
+    if isinstance(agent_kwargs, dict):
+        config["agentKwargs"] = {
+            key: value
+            for key, value in agent_kwargs.items()
+            if key not in CLAUDE_CODE_OMITTED_AGENT_KWARGS
+        }
+    agent_kwargs_by_worker = config.get("agentKwargsByWorker")
+    if isinstance(agent_kwargs_by_worker, dict):
+        config["agentKwargsByWorker"] = {
+            worker_id: {
+                key: value
+                for key, value in worker_kwargs.items()
+                if key not in CLAUDE_CODE_OMITTED_AGENT_KWARGS
+            }
+            for worker_id, worker_kwargs in agent_kwargs_by_worker.items()
+            if isinstance(worker_kwargs, dict)
+        }
+    return config
+
+
 def _build_executor_config(
     *,
     dataset_ref: str,
@@ -298,7 +325,7 @@ def _build_executor_config(
     ):
         if key in body_config and body_config[key] is not None:
             config[key] = body_config[key]
-    return config
+    return _normalize_claude_code_executor_config(config)
 
 
 def _build_asset_sync_executor_config(

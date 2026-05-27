@@ -7,9 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from agent_eval_orchestrator.core.defaults import (
+    CLAUDE_CODE_AGENT_NAME,
+    CLAUDE_CODE_OMITTED_AGENT_KWARGS,
     DEFAULT_ENVIRONMENT_DELETE,
     DEFAULT_ENVIRONMENT_FORCE_BUILD,
     DEFAULT_HARBOR_REPO,
+    DEFAULT_MAX_RETRIES,
 )
 from agent_eval_orchestrator.core.worker_paths import resolve_harbor_repo, resolve_uv_binary
 from agent_eval_orchestrator.executors.base import CollectedArtifacts, Executor, PreparedBatch
@@ -35,6 +38,24 @@ class HarborExecutor(Executor):
             if isinstance(mapping, dict) and worker_id in mapping:
                 return mapping[worker_id]
         return executor_config.get(key, default)
+
+    @staticmethod
+    def _resolve_max_retries(executor_config: dict[str, Any], agent_name: str) -> int | None:
+        if agent_name == CLAUDE_CODE_AGENT_NAME:
+            return DEFAULT_MAX_RETRIES
+        max_retries = executor_config.get("maxRetries")
+        if max_retries is None:
+            return None
+        return int(max_retries)
+
+    @staticmethod
+    def _filter_agent_kwargs(agent_name: str, agent_kwargs: dict[str, Any]) -> dict[str, Any]:
+        filtered = dict(agent_kwargs)
+        if agent_name != CLAUDE_CODE_AGENT_NAME:
+            return filtered
+        for key in CLAUDE_CODE_OMITTED_AGENT_KWARGS:
+            filtered.pop(key, None)
+        return filtered
 
     @staticmethod
     def _worker_mapping_value(executor_config: dict[str, Any], worker_id: str | None, key: str) -> str | None:
@@ -93,6 +114,7 @@ class HarborExecutor(Executor):
             configured=self._worker_mapping_value(executor_config, worker_id, "uvBinary"),
             shared_root=shared_root,
         )
+        agent_name = str(self._resolve_worker_override(executor_config, worker_id, "agentName", "oracle"))
         harbor_args = [
             "run",
             "harbor",
@@ -104,7 +126,7 @@ class HarborExecutor(Executor):
             "-p",
             str(effective_dataset_path),
             "-a",
-            str(self._resolve_worker_override(executor_config, worker_id, "agentName", "oracle")),
+            agent_name,
             "-e",
             str(self._resolve_worker_override(executor_config, worker_id, "envType", "docker")),
             "--n-concurrent",
@@ -118,7 +140,10 @@ class HarborExecutor(Executor):
         if model_name:
             harbor_args.extend(["-m", model_name])
 
-        agent_kwargs = self._resolve_worker_override(executor_config, worker_id, "agentKwargs", {}) or {}
+        agent_kwargs = self._filter_agent_kwargs(
+            agent_name,
+            dict(self._resolve_worker_override(executor_config, worker_id, "agentKwargs", {}) or {}),
+        )
         for key, value in sorted(agent_kwargs.items()):
             harbor_args.extend(["--ak", f"{key}={value}"])
         agent_env = self._resolve_worker_override(executor_config, worker_id, "agentEnv", {}) or {}
@@ -141,7 +166,7 @@ class HarborExecutor(Executor):
             harbor_args.extend(
                 ["--environment-build-timeout-multiplier", str(environment_build_timeout_multiplier)]
             )
-        max_retries = executor_config.get("maxRetries")
+        max_retries = self._resolve_max_retries(executor_config, agent_name)
         if max_retries is not None:
             harbor_args.extend(["--max-retries", str(max_retries)])
         force_build = bool(

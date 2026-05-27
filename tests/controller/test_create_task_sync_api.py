@@ -109,7 +109,11 @@ def test_create_task_local_worker_returns_pending_sync(store, tmp_path):
                 "agentName": "claude-code",
                 "modelName": "deepseek-v4-pro",
                 "maxRetries": 0,
-                "agentKwargs": {"version": "2.1.152"},
+                "agentKwargs": {
+                    "version": "2.1.152",
+                    "max_turns": 80,
+                    "thinking": "disabled",
+                },
                 "processEnv": {"ANTHROPIC_BASE_URL": "https://example.test/v1"},
             },
         }
@@ -129,7 +133,7 @@ def test_create_task_local_worker_returns_pending_sync(store, tmp_path):
     config = payload["template"]["executor_config"]
     assert config["agentName"] == "claude-code"
     assert config["modelName"] == "deepseek-v4-pro"
-    assert config["maxRetries"] == 0
+    assert config["maxRetries"] == 3
     assert config["agentKwargs"] == {"version": "2.1.152"}
     assert config["processEnv"] == {"ANTHROPIC_BASE_URL": "https://example.test/v1"}
     server.shutdown()
