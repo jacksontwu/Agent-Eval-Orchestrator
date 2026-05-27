@@ -445,6 +445,18 @@ class AssetSyncer:
                 with lock:
                     steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
                     self.store.update_asset_sync_job(sync_job_id, steps=steps)
+                uv_binary = str((executor_config.get("uvBinaryByWorker") or {}).get(worker_id) or "")
+                paths = worker_executor_paths(
+                    target_root=str(entry["targetRoot"]),
+                    uv_binary=uv_binary,
+                )
+                self.store.update_task_template_executor_config(
+                    str(run["template_id"]),
+                    {
+                        "datasetPathByWorker": {worker_id: paths["datasetPath"]},
+                        "mountsByWorker": {worker_id: paths["mounts"]},
+                    },
+                )
                 self.store.promote_worker_batches_to_queued(run_id=run_id, worker_id=worker_id)
             except Exception as exc:
                 with lock:
