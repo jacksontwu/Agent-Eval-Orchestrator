@@ -767,6 +767,28 @@ class Store:
             raise RuntimeError("template not found after update")
         return updated
 
+    def update_task_template_dataset_ref(
+        self,
+        template_id: str,
+        dataset_ref: str,
+    ) -> dict[str, Any]:
+        now = now_iso()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE task_templates
+                SET dataset_ref = ?, updated_at = ?
+                WHERE template_id = ?
+                """,
+                (dataset_ref, now, template_id),
+            )
+            if cursor.rowcount == 0:
+                raise RuntimeError("template not found")
+        updated = self.get_task_template(template_id)
+        if not updated:
+            raise RuntimeError("template not found after update")
+        return updated
+
     def _weighted_case_groups(
         self,
         selected_case_ids: list[str],

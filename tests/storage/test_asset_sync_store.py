@@ -129,6 +129,32 @@ def test_update_task_template_executor_config(store):
     assert updated["executor_config"]["mountsByWorker"]["worker-a"][0]["source"].endswith("bitfun-cli")
 
 
+def test_update_task_template_dataset_ref_preserves_executor_config(store):
+    template = store.create_task_template(
+        owner="default",
+        name="cfg-dataset",
+        dataset_ref="/tmp/old-dataset",
+        executor_kind="harbor-docker",
+        executor_config={
+            "useAssetSync": True,
+            "combinedJobsDir": "/tmp/harbor/jobs",
+            "timeoutMultiplier": 1.5,
+        },
+        model_profile_ref=None,
+        note="",
+    )
+
+    updated = store.update_task_template_dataset_ref(
+        template["template_id"],
+        "/tmp/new-dataset",
+    )
+
+    assert updated["dataset_ref"] == "/tmp/new-dataset"
+    assert updated["executor_config"]["useAssetSync"] is True
+    assert updated["executor_config"]["combinedJobsDir"] == "/tmp/harbor/jobs"
+    assert updated["executor_config"]["timeoutMultiplier"] == 1.5
+
+
 def test_is_run_terminal(store):
     template = store.create_task_template(
         owner="default",
