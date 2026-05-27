@@ -41,6 +41,7 @@ from agent_eval_orchestrator.controller.asset_syncer import (
     initial_worker_steps,
     validate_create_task_assets,
 )
+from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
 from agent_eval_orchestrator.normalizers.harbor_job_merge import copy_trial_dirs, write_merged_job
 from agent_eval_orchestrator.normalizers.harbor_timestamps import normalize_jobs_dir
@@ -883,7 +884,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 jobs_dir = str(body.get("jobsDir") or DEFAULT_JOBS_DIR).strip() or str(DEFAULT_JOBS_DIR)
                 body_config = dict(body.get("executorConfig") or {})
-                executor_config = _build_asset_sync_executor_config(
+                executor_config = build_asset_sync_executor_config(
                     worker_ids=worker_ids,
                     workers=workers,
                     body_config=body_config,
