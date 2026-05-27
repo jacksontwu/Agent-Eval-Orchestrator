@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
+from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer, rerun_needs_asset_sync
 from conftest import seed_finished_run_with_cases
 
 
@@ -56,6 +56,52 @@ def test_sync_rerun_job_promotes_rerun_batches(store, tmp_path, sample_ssh_confi
 
     with patch.object(syncer, "_sync_cases"), patch.object(syncer, "_sync_bitfun"):
         syncer.sync_rerun_job(job_id=job["job_id"], run_id=run["run_id"])
+
+    promoted = store.get_batch(rerun["batch_id"])
+    assert promoted["status"] == "queued"
+    updated_run = store.get_run(run["run_id"])
+    assert updated_run["rerun_status"] == "running"
+
+
+def test_rerun_needs_asset_sync():
+    assert rerun_needs_asset_sync({}) is False
+    assert rerun_needs_asset_sync({"datasetPath": ""}) is False
+    assert rerun_needs_asset_sync({"datasetPath": "/tmp/dataset"}) is True
+
+
+def test_sync_rerun_job_skips_sync_without_manifest(store, tmp_path, sample_ssh_config):
+    run, parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    template = store.get_task_template(run["template_id"])
+    store.update_task_template_executor_config(
+        str(template["template_id"]),
+        {"datasetPathByWorker": {"worker-a": str(tmp_path / "dataset")}},
+    )
+    rerun = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["exc-a"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="pending_sync",
+        batch_kind="exception_rerun",
+        parent_batch_id=parent["batch_id"],
+    )
+    job = store.create_run_rerun_job(
+        job_id="rerun-2",
+        run_id=run["run_id"],
+        case_ids=["exc-a"],
+        worker_shards={"worker-a": ["exc-a"]},
+        rerun_batches={"worker-a": rerun["batch_id"]},
+    )
+    syncer = AssetSyncer(
+        store=store,
+        ssh_config_path=sample_ssh_config,
+        controller_shared_root=tmp_path,
+    )
+
+    syncer.sync_rerun_job(job_id=job["job_id"], run_id=run["run_id"])
 
     promoted = store.get_batch(rerun["batch_id"])
     assert promoted["status"] == "queued"

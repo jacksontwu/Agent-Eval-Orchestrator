@@ -30,6 +30,16 @@ def test_is_local_worker_by_existing_shared_root(tmp_path):
     assert is_local_worker(worker, tmp_path) is True
 
 
+def test_existing_remote_like_shared_root_is_not_local(tmp_path):
+    shared = tmp_path / "remote-worker-runtime"
+    shared.mkdir(exist_ok=True)
+    worker = {
+        "host": "203.0.113.10",
+        "capabilities": {"sharedRoot": str(shared)},
+    }
+    assert is_local_worker(worker, tmp_path / "controller-runtime") is False
+
+
 def test_validate_create_task_assets(tmp_path, store):
     dataset = tmp_path / "dataset"
     case_a = dataset / "case-a"
@@ -88,6 +98,39 @@ def test_validate_rejects_remote_without_ssh(tmp_path, store):
             workers=store.list_workers(),
             worker_ids=["remote-a"],
             controller_shared_root=tmp_path,
+        )
+
+
+def test_validate_rejects_remote_without_ssh_even_if_path_exists(tmp_path, store):
+    dataset = tmp_path / "dataset"
+    case_a = dataset / "case-a"
+    case_a.mkdir(parents=True)
+    (case_a / "task.toml").write_text("", encoding="utf-8")
+    bitfun_cli = tmp_path / "bitfun-cli"
+    bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(bitfun_cli, 0o755)
+    config_dir = tmp_path / "bitfun-config"
+    config_dir.mkdir()
+    remote_runtime = tmp_path / "remote-runtime"
+    remote_runtime.mkdir()
+
+    store.register_worker(
+        worker_id="remote-a",
+        display_name="remote",
+        host="203.0.113.10",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(remote_runtime)},
+    )
+    with pytest.raises(RuntimeError, match="ssh_host_alias"):
+        validate_create_task_assets(
+            dataset_path=dataset,
+            bitfun_cli_path=bitfun_cli,
+            bitfun_config_dir=config_dir,
+            case_ids=["case-a"],
+            workers=store.list_workers(),
+            worker_ids=["remote-a"],
+            controller_shared_root=tmp_path / "controller-runtime",
         )
 
 

@@ -1039,6 +1039,12 @@ INDEX_HTML = """<!doctype html>
 
     async function loadTaskDetail(runId) {
       state.taskDetail = await api("/api/eval-tasks/" + encodeURIComponent(runId));
+      const rerunStatus = String(state.taskDetail.rerunStatus || "idle");
+      if (rerunStatus !== "idle") {
+        state.rerunJobDetail = await api("/api/runs/" + encodeURIComponent(runId) + "/rerun");
+      } else {
+        state.rerunJobDetail = null;
+      }
       const groups = state.taskDetail.workerGroups || [];
       if (!groups.find(group => group.workerId === state.selectedTaskWorkerId)) {
         state.selectedTaskWorkerId = groups[0] ? groups[0].workerId : null;
@@ -1052,25 +1058,58 @@ INDEX_HTML = """<!doctype html>
     }
 
     async function openHarborViewer(batchId) {
-      state.viewerInfo = await api("/api/batches/" + encodeURIComponent(batchId) + "/viewer", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: "{}",
-      });
-      renderTaskDetail();
+      const popup = window.open("", "_blank");
+      try {
+        const info = await api("/api/batches/" + encodeURIComponent(batchId) + "/viewer", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: "{}",
+        });
+        if (!info.available) {
+          if (popup) popup.close();
+          alert(info.reason || "Harbor Viewer 启动失败");
+          return;
+        }
+        const targetUrl = info.embeddedUrl || info.url;
+        if (!targetUrl) {
+          if (popup) popup.close();
+          alert("Harbor Viewer 返回了空地址");
+          return;
+        }
+        if (popup) {
+          popup.location.replace(targetUrl);
+          return;
+        }
+        alert("浏览器拦截了 Harbor Viewer 新窗口，请允许弹窗后重试。");
+      } catch (error) {
+        if (popup) popup.close();
+        alert("Harbor Viewer 启动失败：" + formatApiError(error));
+      }
     }
 
     async function openGlobalHarborViewer() {
-      const info = await api("/api/harbor-viewer/global", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: "{}",
-      });
-      if (!info.available) {
-        alert(info.reason || "Harbor Viewer 启动失败");
-        return;
+      // Open a placeholder window immediately so browsers keep this user-initiated.
+      const popup = window.open("", "_blank");
+      try {
+        const info = await api("/api/harbor-viewer/global", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: "{}",
+        });
+        if (!info.available) {
+          if (popup) popup.close();
+          alert(info.reason || "Harbor Viewer 启动失败");
+          return;
+        }
+        if (popup) {
+          popup.location.replace(info.url);
+          return;
+        }
+        alert("浏览器拦截了 Harbor Viewer 新窗口，请允许弹窗后重试。");
+      } catch (error) {
+        if (popup) popup.close();
+        alert("Harbor Viewer 启动失败：" + formatApiError(error));
       }
-      window.open(info.url, "_blank", "noopener,noreferrer");
     }
 
     function renderRerunStatusPanel(detail) {

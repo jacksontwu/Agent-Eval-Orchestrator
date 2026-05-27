@@ -130,12 +130,12 @@ def resolve_harbor_repo(
     candidates: list[Path] = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
+    if configured:
+        candidates.append(Path(configured).expanduser())
     if shared_root:
         derived = default_harbor_repo_from_shared_root(shared_root)
         if derived:
             candidates.append(derived)
-    if configured:
-        candidates.append(Path(configured).expanduser())
     candidates.append(Path(default).expanduser())
 
     seen: set[str] = set()

@@ -61,7 +61,7 @@ def test_resolve_uv_binary_falls_back_to_which(tmp_path, monkeypatch):
     assert resolved == str(uv)
 
 
-def test_resolve_harbor_repo_prefers_local_shared_root(tmp_path):
+def test_resolve_harbor_repo_prefers_configured_before_local_shared_root(tmp_path):
     local_harbor = tmp_path / "worker" / "harbor"
     local_harbor.mkdir(parents=True)
     controller_harbor = tmp_path / "controller-harbor"
@@ -74,7 +74,26 @@ def test_resolve_harbor_repo_prefers_local_shared_root(tmp_path):
         configured=str(controller_harbor),
         default="/missing/default",
     )
-    assert resolved == local_harbor.resolve()
+    assert resolved == controller_harbor.resolve()
+
+
+def test_resolve_harbor_repo_prefers_explicit_before_configured_and_local(tmp_path):
+    local_harbor = tmp_path / "worker" / "harbor"
+    local_harbor.mkdir(parents=True)
+    controller_harbor = tmp_path / "controller-harbor"
+    controller_harbor.mkdir()
+    explicit_harbor = tmp_path / "explicit-harbor"
+    explicit_harbor.mkdir()
+    shared_root = tmp_path / "worker" / "agent-eval-orchestrator" / "runtime"
+    shared_root.mkdir(parents=True)
+
+    resolved = resolve_harbor_repo(
+        explicit=str(explicit_harbor),
+        shared_root=shared_root,
+        configured=str(controller_harbor),
+        default="/missing/default",
+    )
+    assert resolved == explicit_harbor.resolve()
 
 
 def test_resolve_harbor_repo_uses_configured_when_local_missing(tmp_path):

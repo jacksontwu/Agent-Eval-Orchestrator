@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import ipaddress
 import shutil
+import socket
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -26,7 +28,24 @@ def is_local_worker(worker: dict[str, Any], controller_shared_root: Path) -> boo
     shared_root = str(caps.get("sharedRoot") or "").strip()
     if not shared_root:
         return False
-    return Path(shared_root).expanduser().exists()
+    shared_path = Path(shared_root).expanduser()
+    if not shared_path.exists():
+        return False
+    try:
+        shared_path.resolve().relative_to(controller_shared_root.expanduser().resolve())
+        return True
+    except ValueError:
+        pass
+    host = str(worker.get("host") or "").strip()
+    if not host:
+        return False
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return True
+    except ValueError:
+        local_names = {name for name in (socket.gethostname(), socket.getfqdn(), "localhost") if name}
+        return host in local_names
+    return False
 
 
 def initial_worker_steps(worker_ids: list[str]) -> list[dict[str, Any]]:
@@ -40,6 +59,10 @@ def initial_worker_steps(worker_ids: list[str]) -> list[dict[str, Any]]:
         }
         for worker_id in worker_ids
     ]
+
+
+def rerun_needs_asset_sync(manifest: dict[str, Any]) -> bool:
+    return bool(str(manifest.get("datasetPath") or "").strip())
 
 
 def set_worker_step_status(
@@ -317,6 +340,38 @@ class AssetSyncer:
         )
         thread.start()
 
+    def _finish_rerun_sync_success(
+        self,
+        *,
+        run_id: str,
+        job_id: str,
+        sync_job_id: str,
+        steps: list[dict[str, Any]],
+    ) -> None:
+        self.store.update_run_rerun_fields(run_id=run_id, rerun_status="running")
+        self.store.update_run_rerun_job(job_id, status="running")
+        self.store.update_asset_sync_job(sync_job_id, status="succeeded", steps=steps, finished=True)
+
+    def _finish_rerun_sync_failure(
+        self,
+        *,
+        run_id: str,
+        job_id: str,
+        sync_job_id: str,
+        steps: list[dict[str, Any]],
+        errors: list[str],
+    ) -> None:
+        error_text = "; ".join(errors)
+        self.store.update_run_rerun_fields(run_id=run_id, rerun_status="failed")
+        self.store.update_run_rerun_job(job_id, status="failed", error_text=error_text, finished=True)
+        self.store.update_asset_sync_job(
+            sync_job_id,
+            status="failed",
+            steps=steps,
+            error_text=error_text,
+            finished=True,
+        )
+
     def sync_rerun_job(self, *, job_id: str, run_id: str) -> None:
         rerun_job = self.store.get_run_rerun_job(job_id)
         if not rerun_job:
@@ -326,6 +381,7 @@ class AssetSyncer:
             raise RuntimeError("run not found")
         manifest = dict(run.get("sync_manifest") or {})
         template = self.store.get_task_template(str(run["template_id"]))
+        executor_config = dict((template or {}).get("executor_config") or {})
         worker_shards = dict(rerun_job["worker_shards"])
         worker_ids = list(worker_shards.keys())
         steps = initial_worker_steps(worker_ids)
@@ -333,6 +389,40 @@ class AssetSyncer:
         self.store.update_run_rerun_job(job_id, status="running", sync_job_id=sync_job_id)
         self.store.create_asset_sync_job(job_id=sync_job_id, run_id=run_id, steps=steps)
         self.store.update_asset_sync_job(sync_job_id, status="running", steps=steps)
+
+        if not rerun_needs_asset_sync(manifest):
+            dataset_by_worker = dict(executor_config.get("datasetPathByWorker") or {})
+            missing_workers = [
+                worker_id
+                for worker_id in worker_ids
+                if not str(dataset_by_worker.get(worker_id) or "").strip()
+            ]
+            if missing_workers:
+                for worker_id in worker_ids:
+                    steps = set_worker_step_status(steps, worker_id, "sync_cases", "failed")
+                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
+                self._finish_rerun_sync_failure(
+                    run_id=run_id,
+                    job_id=job_id,
+                    sync_job_id=sync_job_id,
+                    steps=steps,
+                    errors=[
+                        "missing datasetPathByWorker for workers without sync_manifest: "
+                        + ", ".join(missing_workers)
+                    ],
+                )
+                return
+            for worker_id in worker_ids:
+                steps = set_worker_step_status(steps, worker_id, "sync_cases", "succeeded")
+                steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
+                self.store.promote_worker_batches_to_queued(run_id=run_id, worker_id=worker_id)
+            self._finish_rerun_sync_success(
+                run_id=run_id,
+                job_id=job_id,
+                sync_job_id=sync_job_id,
+                steps=steps,
+            )
+            return
 
         errors: list[str] = []
         lock = threading.Lock()
@@ -371,20 +461,21 @@ class AssetSyncer:
             thread.join()
 
         if errors:
-            self.store.update_run_rerun_fields(run_id=run_id, rerun_status="failed")
-            self.store.update_run_rerun_job(job_id, status="failed", error_text="; ".join(errors), finished=True)
-            self.store.update_asset_sync_job(
-                sync_job_id,
-                status="failed",
+            self._finish_rerun_sync_failure(
+                run_id=run_id,
+                job_id=job_id,
+                sync_job_id=sync_job_id,
                 steps=steps,
-                error_text="; ".join(errors),
-                finished=True,
+                errors=errors,
             )
             return
 
-        self.store.update_run_rerun_fields(run_id=run_id, rerun_status="running")
-        self.store.update_run_rerun_job(job_id, status="running")
-        self.store.update_asset_sync_job(sync_job_id, status="succeeded", steps=steps, finished=True)
+        self._finish_rerun_sync_success(
+            run_id=run_id,
+            job_id=job_id,
+            sync_job_id=sync_job_id,
+            steps=steps,
+        )
 
     def _sync_cases(self, entry: dict[str, Any], manifest: dict[str, Any]) -> None:
         dataset_path = Path(str(manifest["datasetPath"]))

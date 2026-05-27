@@ -105,6 +105,13 @@ def test_create_task_local_worker_returns_pending_sync(store, tmp_path):
             "bitfunConfigDir": assets["bitfunConfigDir"],
             "workerIds": ["local-a"],
             "selectedCaseIds": ["case-a"],
+            "executorConfig": {
+                "agentName": "claude-code",
+                "modelName": "deepseek-v4-pro",
+                "maxRetries": 0,
+                "agentKwargs": {"version": "2.1.152"},
+                "processEnv": {"ANTHROPIC_BASE_URL": "https://example.test/v1"},
+            },
         }
     )
     conn.request(
@@ -119,6 +126,12 @@ def test_create_task_local_worker_returns_pending_sync(store, tmp_path):
     assert payload["run"]["syncStatus"] == "pending"
     assert payload["syncJobId"]
     assert payload["batches"][0]["status"] == "pending_sync"
+    config = payload["template"]["executor_config"]
+    assert config["agentName"] == "claude-code"
+    assert config["modelName"] == "deepseek-v4-pro"
+    assert config["maxRetries"] == 0
+    assert config["agentKwargs"] == {"version": "2.1.152"}
+    assert config["processEnv"] == {"ANTHROPIC_BASE_URL": "https://example.test/v1"}
     server.shutdown()
 
 

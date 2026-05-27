@@ -234,9 +234,9 @@ def _build_executor_config(
     verifier_timeout_multiplier = body_config.get("verifierTimeoutMultiplier")
     agent_setup_timeout_multiplier = body_config.get("agentSetupTimeoutMultiplier")
     environment_build_timeout_multiplier = body_config.get("environmentBuildTimeoutMultiplier")
-    return {
+    config = {
         "agentName": str(body_config.get("agentName") or DEFAULT_AGENT_NAME),
-        "envType": "docker",
+        "envType": str(body_config.get("envType") or "docker"),
         "nConcurrent": n_concurrent,
         "timeoutMultiplier": (
             float(timeout_multiplier) if timeout_multiplier not in (None, "") else DEFAULT_TIMEOUT_MULTIPLIER
@@ -259,7 +259,11 @@ def _build_executor_config(
             if environment_build_timeout_multiplier not in (None, "")
             else DEFAULT_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER
         ),
-        "maxRetries": int(body_config.get("maxRetries") or DEFAULT_MAX_RETRIES),
+        "maxRetries": (
+            int(body_config["maxRetries"])
+            if body_config.get("maxRetries") not in (None, "")
+            else DEFAULT_MAX_RETRIES
+        ),
         "environmentForceBuild": (
             bool(body_config["environmentForceBuild"])
             if "environmentForceBuild" in body_config
@@ -277,6 +281,24 @@ def _build_executor_config(
         "collectJobs": True,
         "combinedJobsDir": jobs_dir,
     }
+    for key in (
+        "modelName",
+        "modelNameByWorker",
+        "agentKwargs",
+        "agentKwargsByWorker",
+        "agentEnv",
+        "agentEnvByWorker",
+        "processEnv",
+        "processEnvByWorker",
+        "extraArgs",
+        "harborRepoPath",
+        "datasetPath",
+        "uvBinary",
+        "mounts",
+    ):
+        if key in body_config and body_config[key] is not None:
+            config[key] = body_config[key]
+    return config
 
 
 def _build_asset_sync_executor_config(
@@ -409,8 +431,6 @@ class Handler(BaseHTTPRequestHandler):
     def _ensure_global_harbor_viewer(self) -> dict[str, object]:
         jobs_dir = DEFAULT_JOBS_DIR
         jobs_dir.mkdir(parents=True, exist_ok=True)
-        self._rebuild_merged_jobs(jobs_dir)
-        normalize_jobs_dir(jobs_dir)
         try:
             with request.urlopen(f"http://127.0.0.1:{GLOBAL_VIEWER_PORT}/api/health", timeout=1):
                 return {
@@ -421,6 +441,9 @@ class Handler(BaseHTTPRequestHandler):
                 }
         except Exception:
             pass
+
+        self._rebuild_merged_jobs(jobs_dir)
+        normalize_jobs_dir(jobs_dir)
 
         if self.global_viewer_process and self.global_viewer_process.poll() is None:
             self.global_viewer_process.terminate()
@@ -746,12 +769,14 @@ class Handler(BaseHTTPRequestHandler):
                             }
                         )
             remaining = len(self.store.list_exception_cases_for_run(run_id))
+            error_text = str((job or {}).get("error_text") or "") or None
             _json_response(
                 self,
                 {
                     "runId": run_id,
                     "rerunStatus": run.get("rerun_status") or "idle",
                     "rerunJobId": run.get("rerun_job_id"),
+                    "errorText": error_text,
                     "job": job,
                     "rerunBatches": rerun_batches,
                     "remainingExceptionCount": remaining,
