@@ -313,7 +313,7 @@ def build_ssh_target(
 ) -> tuple[list[str], str]:
     alias = str(worker.get("ssh_host_alias") or "").strip()
     if alias and ssh_config and ssh_config.exists():
-        return ["-F", str(ssh_config), alias], alias
+        return ["-F", str(ssh_config)], alias
 
     host = str(worker.get("host") or worker.get("worker_id") or "").strip()
     if not host:
