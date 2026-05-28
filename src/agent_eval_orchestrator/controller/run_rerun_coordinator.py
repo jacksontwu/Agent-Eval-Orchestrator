@@ -145,10 +145,13 @@ class RunRerunCoordinator:
             or (DEFAULT_HARBOR_REPO / "jobs")
         )
         worker_ids = list(worker_shards.keys())
+        submitted_executor_config = config.get("executorConfig") or {}
+        if not isinstance(submitted_executor_config, dict):
+            raise RerunValidationError(400, "executorConfig must be an object")
         body_config = self._filter_worker_maps(
             {
                 **existing_executor_config,
-                **dict(config.get("executorConfig") or {}),
+                **submitted_executor_config,
             },
             worker_ids,
         )
@@ -165,6 +168,10 @@ class RunRerunCoordinator:
                 worker_ids=worker_ids,
                 controller_shared_root=controller_root,
             )
+        except RuntimeError as exc:
+            raise RerunValidationError(400, str(exc)) from exc
+
+        try:
             executor_config = build_asset_sync_executor_config(
                 worker_ids=worker_ids,
                 workers=workers,
@@ -183,7 +190,7 @@ class RunRerunCoordinator:
                 workers_by_id=workers_by_id,
                 controller_shared_root=controller_root,
             )
-        except Exception as exc:
+        except (KeyError, RuntimeError, TypeError, ValueError) as exc:
             raise RerunValidationError(400, str(exc)) from exc
 
         existing_workers = existing_manifest.get("workers") or {}

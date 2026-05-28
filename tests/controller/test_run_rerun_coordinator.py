@@ -207,6 +207,32 @@ def test_start_rerun_config_validation_happens_before_job_creation(store, tmp_pa
     assert store.get_task_template(run["template_id"])["dataset_ref"] == original_template["dataset_ref"]
 
 
+def test_start_rerun_rejects_malformed_executor_config_before_job_creation(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    _make_worker_local(store, tmp_path)
+    assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    with pytest.raises(RerunValidationError) as exc:
+        coordinator.start_rerun(
+            run["run_id"],
+            config={
+                "datasetPath": assets["datasetPath"],
+                "bitfunCliPath": assets["bitfunCliPath"],
+                "bitfunConfigDir": assets["bitfunConfigDir"],
+                "jobsDir": assets["jobsDir"],
+                "executorConfig": "bad",
+            },
+        )
+
+    assert exc.value.code == 400
+    assert exc.value.message == "executorConfig must be an object"
+    assert store.get_active_run_rerun_job(run["run_id"]) is None
+
+
 def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,
