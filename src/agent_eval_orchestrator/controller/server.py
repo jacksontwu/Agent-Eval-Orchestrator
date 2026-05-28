@@ -816,6 +816,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.run_rerun_coordinator is None:
                 _json_response(self, {"error": "rerun coordinator unavailable"}, 500)
                 return
+            if not isinstance(body, dict):
+                _json_response(self, {"error": "request body must be a JSON object"}, 400)
+                return
             run_id = path.split("/")[3]
             try:
                 result = self.run_rerun_coordinator.start_rerun(run_id, config=body)
