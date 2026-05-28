@@ -2103,6 +2103,34 @@ class Store:
         candidate = stem.rsplit("__", 1)[0].strip()
         return candidate or original_case_id
 
+    def resolve_dataset_case_id(
+        self,
+        *,
+        dataset_path: Path,
+        case: dict[str, Any],
+        selected_case_ids: list[str] | None = None,
+    ) -> str | None:
+        root = dataset_path.expanduser().resolve()
+        candidates: list[str] = []
+        for key in ("original_case_id", "case_id"):
+            value = str(case.get(key) or "").strip()
+            if value and value not in candidates:
+                candidates.append(value)
+        for candidate in candidates:
+            if (root / candidate).is_dir():
+                return candidate
+        for selected_id in selected_case_ids or []:
+            selected = str(selected_id or "").strip()
+            if not selected:
+                continue
+            if self._case_covers_selected(case, selected) and (root / selected).is_dir():
+                return selected
+        if root.is_dir():
+            for entry in sorted(root.iterdir()):
+                if entry.is_dir() and self._case_covers_selected(case, entry.name):
+                    return entry.name
+        return candidates[0] if candidates else None
+
     @staticmethod
     def _case_covers_selected(actual_case: dict[str, Any], selected_id: str) -> bool:
         selected_id = str(selected_id or "").strip()

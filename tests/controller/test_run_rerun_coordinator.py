@@ -208,6 +208,54 @@ def test_start_rerun_config_validation_happens_before_job_creation(store, tmp_pa
     assert store.get_task_template(run["template_id"])["dataset_ref"] == original_template["dataset_ref"]
 
 
+def test_start_rerun_resolves_truncated_case_ids_to_dataset_dirs(store, tmp_path):
+    import json
+
+    long_selected = (
+        "instance_tutao__tutanota-fb32e5f9d9fc152a00144d56dd0af01760a2d4dc-"
+        "vc4e41fd0029957297843cb9dec4a25c7c756f029"
+    )
+    short_case_id = "instance_tutao__tutanota-fb32e5f"
+    run, parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": short_case_id,
+                "status": "errored",
+                "error_text": "boom",
+                "artifact_index": {
+                    "trialDir": f"/tmp/jobs/batch/{short_case_id}__XsXcKQq",
+                },
+            }
+        ],
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE batches SET selected_case_ids_json = ? WHERE batch_id = ?",
+            (json.dumps([long_selected], ensure_ascii=False), parent["batch_id"]),
+        )
+        conn.commit()
+    _make_worker_local(store, tmp_path)
+    assets = _prepare_rerun_assets(tmp_path, [long_selected])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    result = coordinator.start_rerun(
+        run["run_id"],
+        config={
+            "datasetPath": assets["datasetPath"],
+            "bitfunCliPath": assets["bitfunCliPath"],
+            "bitfunConfigDir": assets["bitfunConfigDir"],
+            "jobsDir": assets["jobsDir"],
+            "executorConfig": {"nConcurrent": 2},
+        },
+    )
+
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["selected_case_ids"] == [long_selected]
+    assert job["worker_shards"]["worker-a"] == [long_selected]
+
+
 def test_start_rerun_rejects_malformed_executor_config_before_job_creation(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,

@@ -40,10 +40,14 @@ class RunRerunCoordinator:
         if not grouped:
             raise RerunValidationError(400, "no exception cases")
 
-        worker_shards = {
-            worker_id: [str(item["case_id"]) for item in items]
-            for worker_id, items in grouped.items()
-        }
+        template = self.store.get_task_template(str(run["template_id"]))
+        existing_manifest = dict(run.get("sync_manifest") or {})
+        dataset_path = self._resolve_dataset_path(
+            config=config,
+            template=template,
+            existing_manifest=existing_manifest,
+        )
+        worker_shards = self._resolve_worker_shards(grouped, dataset_path)
         all_case_ids = [
             case_id
             for case_ids in worker_shards.values()
@@ -100,6 +104,43 @@ class RunRerunCoordinator:
             "exceptionCount": len(all_case_ids),
             "workerShards": {worker_id: len(case_ids) for worker_id, case_ids in worker_shards.items()},
         }
+
+    def _resolve_dataset_path(
+        self,
+        *,
+        config: dict[str, Any] | None,
+        template: dict[str, Any] | None,
+        existing_manifest: dict[str, Any],
+    ) -> Path:
+        return Path(
+            str(
+                (config or {}).get("datasetPath")
+                or existing_manifest.get("datasetPath")
+                or (template or {}).get("dataset_ref")
+                or ""
+            )
+        ).expanduser()
+
+    def _resolve_worker_shards(
+        self,
+        grouped: dict[str, list[dict[str, Any]]],
+        dataset_path: Path,
+    ) -> dict[str, list[str]]:
+        worker_shards: dict[str, list[str]] = {}
+        for worker_id, items in grouped.items():
+            resolved_ids: list[str] = []
+            for item in items:
+                case = dict(item.get("case") or {})
+                parent = self.store.get_batch(str(item["parent_batch_id"]))
+                selected_case_ids = list((parent or {}).get("selected_case_ids") or [])
+                resolved = self.store.resolve_dataset_case_id(
+                    dataset_path=dataset_path,
+                    case=case,
+                    selected_case_ids=selected_case_ids,
+                )
+                resolved_ids.append(resolved or str(item["case_id"]))
+            worker_shards[worker_id] = resolved_ids
+        return worker_shards
 
     def _has_applicable_config(self, config: dict[str, Any] | None) -> bool:
         if not config:

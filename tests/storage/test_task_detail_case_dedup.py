@@ -52,3 +52,30 @@ def test_case_covers_selected_matches_prefix_and_exact_ids(store):
 
     assert store._case_covers_selected(actual_case, long_selected) is True
     assert store._case_covers_selected(actual_case, "other-case") is False
+
+
+def test_resolve_dataset_case_id_prefers_batch_selected_id(tmp_path, store):
+    long_selected = (
+        "instance_tutao__tutanota-fb32e5f9d9fc152a00144d56dd0af01760a2d4dc-"
+        "vc4e41fd0029957297843cb9dec4a25c7c756f029"
+    )
+    short_case_id = "instance_tutao__tutanota-fb32e5f"
+    dataset = tmp_path / "dataset"
+    case_dir = dataset / long_selected
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    case = {
+        "case_id": short_case_id,
+        "original_case_id": short_case_id,
+        "artifact_index": {
+            "trialDir": f"/tmp/jobs/batch/{short_case_id}__XsXcKQq",
+        },
+    }
+
+    resolved = store.resolve_dataset_case_id(
+        dataset_path=dataset,
+        case=case,
+        selected_case_ids=[long_selected],
+    )
+
+    assert resolved == long_selected
