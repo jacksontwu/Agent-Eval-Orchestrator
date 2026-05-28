@@ -2082,35 +2082,55 @@ INDEX_HTML = """<!doctype html>
 
     async function submitAddWorkerForm(event) {
       event.preventDefault();
-      const form = new FormData(event.target);
-      const mode = String(form.get("deployMode") || "fresh");
-      const useTunnel = Boolean(form.get("useTunnel"));
+      const form = event.target;
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const formData = new FormData(form);
+      const mode = String(formData.get("deployMode") || "fresh");
+      const useTunnel = Boolean(formData.get("useTunnel"));
       const payload = {
-        workerId: String(form.get("workerId") || "").trim(),
-        displayName: String(form.get("displayName") || "").trim() || String(form.get("workerId") || "").trim(),
-        slotsTotal: Number(form.get("slotsTotal") || 1),
+        workerId: String(formData.get("workerId") || "").trim(),
+        displayName: String(formData.get("displayName") || "").trim() || String(formData.get("workerId") || "").trim(),
+        slotsTotal: Number(formData.get("slotsTotal") || 1),
         mode,
-        sshHostAlias: String(form.get("sshHostAlias") || "").trim(),
+        sshHostAlias: String(formData.get("sshHostAlias") || "").trim(),
         connectionMode: useTunnel ? "tunnel" : "direct",
       };
       if (useTunnel) {
-        payload.tunnelRemotePort = Number(form.get("tunnelRemotePort") || 17380);
+        payload.tunnelRemotePort = Number(formData.get("tunnelRemotePort") || 17380);
       } else {
-        payload.controllerInternalIp = String(form.get("controllerInternalIp") || "").trim();
+        payload.controllerInternalIp = String(formData.get("controllerInternalIp") || "").trim();
       }
       if (mode === "fresh") {
-        payload.sshBootstrapHostAlias = String(form.get("sshBootstrapHostAlias") || "").trim();
-        payload.djnPassword = String(form.get("djnPassword") || "");
+        payload.sshBootstrapHostAlias = String(formData.get("sshBootstrapHostAlias") || "").trim();
+        payload.djnPassword = String(formData.get("djnPassword") || "");
+        if (!payload.sshBootstrapHostAlias || !payload.djnPassword) {
+          showToast("全新安装需要填写 SSH Host (root) 和 DJN 密码");
+          return;
+        }
       }
-      const result = await api("/api/workers/provision", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload),
-      });
-      state.provisionJob = { jobId: result.jobId, workerId: result.workerId };
-      state.addWorkerPhase = "progress";
-      await renderAddWorkerModal();
-      startProvisionPolling();
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.dataset.originalLabel = submitBtn.textContent;
+        submitBtn.textContent = "提交中…";
+      }
+      try {
+        const result = await api("/api/workers/provision", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        state.provisionJob = { jobId: result.jobId, workerId: result.workerId };
+        state.addWorkerPhase = "progress";
+        await renderAddWorkerModal();
+        startProvisionPolling();
+      } catch (error) {
+        showToast("部署失败：" + formatApiError(error));
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = submitBtn.dataset.originalLabel || "开始部署";
+        }
+      }
     }
 
     async function pollProvisionJob() {
