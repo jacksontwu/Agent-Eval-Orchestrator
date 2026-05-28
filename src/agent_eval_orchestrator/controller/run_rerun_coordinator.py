@@ -144,11 +144,14 @@ class RunRerunCoordinator:
             or existing_executor_config.get("combinedJobsDir")
             or (DEFAULT_HARBOR_REPO / "jobs")
         )
-        body_config = {
-            **existing_executor_config,
-            **dict(config.get("executorConfig") or {}),
-        }
         worker_ids = list(worker_shards.keys())
+        body_config = self._filter_worker_maps(
+            {
+                **existing_executor_config,
+                **dict(config.get("executorConfig") or {}),
+            },
+            worker_ids,
+        )
         workers = self.store.list_workers()
         workers_by_id = {str(item["worker_id"]): item for item in workers}
 
@@ -191,10 +194,9 @@ class RunRerunCoordinator:
             str(template["template_id"]),
             executor_config,
             replace_keys={
-                "uvBinaryByWorker",
-                "harborRepoPathByWorker",
-                "datasetPathByWorker",
-                "mountsByWorker",
+                key
+                for key, value in executor_config.items()
+                if key.endswith("ByWorker") and isinstance(value, dict)
             },
         )
         self.store.update_task_template_dataset_ref(str(template["template_id"]), str(dataset_path.resolve()))
@@ -203,3 +205,17 @@ class RunRerunCoordinator:
             sync_manifest=manifest,
         )
         return int(executor_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
+
+    def _filter_worker_maps(self, body_config: dict[str, Any], worker_ids: list[str]) -> dict[str, Any]:
+        allowed = set(worker_ids)
+        filtered: dict[str, Any] = {}
+        for key, value in body_config.items():
+            if key.endswith("ByWorker") and isinstance(value, dict):
+                filtered[key] = {
+                    str(worker_id): worker_value
+                    for worker_id, worker_value in value.items()
+                    if str(worker_id) in allowed
+                }
+                continue
+            filtered[key] = value
+        return filtered

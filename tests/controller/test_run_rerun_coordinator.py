@@ -236,6 +236,22 @@ def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path)
                 "worker-a": [{"source": "/old/source-a"}],
                 "worker-b": [{"source": "/old/source-b"}],
             },
+            "modelNameByWorker": {
+                "worker-a": "model-a",
+                "worker-b": "model-b",
+            },
+            "agentKwargsByWorker": {
+                "worker-a": {"version": "a"},
+                "worker-b": {"version": "b"},
+            },
+            "agentEnvByWorker": {
+                "worker-a": {"A": "1"},
+                "worker-b": {"B": "2"},
+            },
+            "processEnvByWorker": {
+                "worker-a": {"PA": "1"},
+                "worker-b": {"PB": "2"},
+            },
         },
     )
     assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
@@ -258,5 +274,9 @@ def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path)
         "harborRepoPathByWorker",
         "datasetPathByWorker",
         "mountsByWorker",
+        "modelNameByWorker",
+        "agentKwargsByWorker",
+        "agentEnvByWorker",
+        "processEnvByWorker",
     ):
         assert "worker-b" not in executor_config[key]
