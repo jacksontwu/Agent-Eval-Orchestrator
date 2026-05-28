@@ -1567,6 +1567,20 @@ INDEX_HTML = """<!doctype html>
       const modalState = state.rerunConfig;
       if (!modalState || modalState.submitting) return;
       const payload = collectTaskConfigPayload(event.target);
+      modalState.defaults = {
+        ...modalState.defaults,
+        executorKind: String(new FormData(event.target).get("executorKind") || modalState.defaults.executorKind || "harbor-docker"),
+        agentName: String(payload.executorConfig.agentName || modalState.defaults.agentName || "bitfun-cli"),
+        nConcurrent: payload.executorConfig.nConcurrent,
+        timeoutMultiplier: payload.executorConfig.timeoutMultiplier,
+        agentTimeoutMultiplier: payload.executorConfig.agentTimeoutMultiplier,
+        verifierTimeoutMultiplier: payload.executorConfig.verifierTimeoutMultiplier,
+        environmentBuildTimeoutMultiplier: payload.executorConfig.environmentBuildTimeoutMultiplier,
+        datasetPath: payload.datasetPath,
+        bitfunCliPath: payload.bitfunCliPath,
+        bitfunConfigDir: payload.bitfunConfigDir,
+        jobsDir: payload.jobsDir,
+      };
       modalState.submitting = true;
       modalState.error = "";
       renderRerunConfigModal();
@@ -2238,7 +2252,9 @@ INDEX_HTML = """<!doctype html>
         closePreviewModal();
       }
     });
-    document.getElementById("rerunConfigModalClose").addEventListener("click", closeRerunConfigModal);
+    document.getElementById("rerunConfigModalClose").addEventListener("click", () => {
+      if (!state.rerunConfig?.submitting) closeRerunConfigModal();
+    });
     document.getElementById("rerunConfigModal").addEventListener("click", (event) => {
       if (event.target.id === "rerunConfigModal" && !state.rerunConfig?.submitting) {
         closeRerunConfigModal();
