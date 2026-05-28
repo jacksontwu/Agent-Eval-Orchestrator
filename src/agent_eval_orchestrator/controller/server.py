@@ -818,7 +818,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             run_id = path.split("/")[3]
             try:
-                result = self.run_rerun_coordinator.start_rerun(run_id)
+                result = self.run_rerun_coordinator.start_rerun(run_id, config=body)
             except RerunValidationError as exc:
                 _json_response(self, {"error": exc.message}, exc.code)
                 return

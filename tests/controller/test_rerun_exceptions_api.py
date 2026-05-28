@@ -1,4 +1,5 @@
 import json
+import os
 from http.client import HTTPConnection
 from threading import Thread
 from unittest.mock import patch
@@ -33,6 +34,41 @@ def start_test_server(store, tmp_path, port):
     return server
 
 
+def _prepare_rerun_assets(tmp_path, case_ids):
+    dataset = tmp_path / "dataset"
+    dataset.mkdir(parents=True, exist_ok=True)
+    for case_id in case_ids:
+        case_dir = dataset / case_id
+        case_dir.mkdir(parents=True)
+        (case_dir / "task.toml").write_text("", encoding="utf-8")
+    bitfun_cli = tmp_path / "bitfun-cli"
+    bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(bitfun_cli, 0o755)
+    bitfun_config = tmp_path / "bitfun-config"
+    bitfun_config.mkdir()
+    jobs_dir = tmp_path / "harbor" / "jobs"
+    return {
+        "datasetPath": str(dataset),
+        "bitfunCliPath": str(bitfun_cli),
+        "bitfunConfigDir": str(bitfun_config),
+        "jobsDir": str(jobs_dir),
+    }
+
+
+def _make_worker_local(store, tmp_path):
+    store.register_worker(
+        worker_id="worker-a",
+        display_name="worker-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={
+            "sharedRoot": str(tmp_path / "shared"),
+            "localToController": True,
+        },
+    )
+
+
 def test_post_rerun_exceptions_happy_path(store, tmp_path):
     run, _ = seed_finished_run_with_cases(
         store,
@@ -52,6 +88,105 @@ def test_post_rerun_exceptions_happy_path(store, tmp_path):
     payload = json.loads(resp.read().decode("utf-8"))
     assert payload["exceptionCount"] == 1
     assert payload["rerunStatus"] == "syncing"
+    server.shutdown()
+
+
+def test_post_rerun_exceptions_accepts_config_body(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom"},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    _make_worker_local(store, tmp_path)
+    assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
+    previous_target = str(tmp_path / "shared" / "sync" / run["run_id"])
+    store.update_run_sync_fields(
+        run_id=run["run_id"],
+        sync_status="succeeded",
+        sync_manifest={
+            "datasetPath": "/tmp/old-dataset",
+            "bitfunCliPath": "/tmp/old-bitfun-cli",
+            "bitfunConfigDir": "/tmp/old-bitfun-config",
+            "workers": {
+                "worker-a": {
+                    "caseIds": ["exc-a", "ok"],
+                    "targetRoot": previous_target,
+                    "transport": "local",
+                }
+            },
+        },
+    )
+    server = start_test_server(store, tmp_path, 9895)
+    conn = HTTPConnection("127.0.0.1", 9895)
+    body = json.dumps(
+        {
+            "datasetPath": assets["datasetPath"],
+            "bitfunCliPath": assets["bitfunCliPath"],
+            "bitfunConfigDir": assets["bitfunConfigDir"],
+            "jobsDir": assets["jobsDir"],
+            "executorConfig": {"nConcurrent": 2},
+        }
+    )
+    with patch.object(AssetSyncer, "start_rerun_sync_async"):
+        conn.request(
+            "POST",
+            f"/api/runs/{run['run_id']}/rerun-exceptions",
+            body=body,
+            headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+        )
+        resp = conn.getresponse()
+    assert resp.status == 201
+    payload = json.loads(resp.read().decode("utf-8"))
+    assert payload["exceptionCount"] == 1
+    template = store.get_task_template(run["template_id"])
+    assert template["dataset_ref"] == assets["datasetPath"]
+    executor_config = template["executor_config"]
+    assert executor_config["nConcurrent"] == 2
+    assert executor_config["combinedJobsDir"] == assets["jobsDir"]
+    updated_run = store.get_run(run["run_id"])
+    manifest = updated_run["sync_manifest"]
+    assert manifest["datasetPath"] == assets["datasetPath"]
+    assert manifest["bitfunCliPath"] == assets["bitfunCliPath"]
+    assert manifest["bitfunConfigDir"] == assets["bitfunConfigDir"]
+    assert manifest["workers"]["worker-a"]["targetRoot"] == previous_target
+    assert manifest["workers"]["worker-a"]["transport"] == "local"
+    job = store.get_run_rerun_job(payload["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["batch_options"]["concurrency"] == 2
+    server.shutdown()
+
+
+def test_post_rerun_exceptions_rejects_invalid_config_without_job(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    _make_worker_local(store, tmp_path)
+    assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
+    server = start_test_server(store, tmp_path, 9896)
+    conn = HTTPConnection("127.0.0.1", 9896)
+    body = json.dumps(
+        {
+            "datasetPath": str(tmp_path / "missing-dataset"),
+            "bitfunCliPath": assets["bitfunCliPath"],
+            "bitfunConfigDir": assets["bitfunConfigDir"],
+            "jobsDir": assets["jobsDir"],
+            "executorConfig": {"nConcurrent": 2},
+        }
+    )
+    conn.request(
+        "POST",
+        f"/api/runs/{run['run_id']}/rerun-exceptions",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    assert resp.status == 400
+    assert "datasetPath" in payload["error"]
+    assert store.get_active_run_rerun_job(run["run_id"]) is None
     server.shutdown()
 
 
