@@ -1919,7 +1919,7 @@ class Store:
             if status in group["statusCounts"]:
                 group["statusCounts"][status] += 1
             actual_cases = self.list_case_runs(str(batch["batch_id"]))
-            actual_case_ids = {str(case["case_id"]) for case in actual_cases}
+            unmatched_actual = list(actual_cases)
             for case in actual_cases:
                 group["cases"].append(
                     {
@@ -1931,7 +1931,16 @@ class Store:
                     }
                 )
             for case_id in batch.get("selected_case_ids") or []:
-                if case_id in actual_case_ids:
+                match_idx = next(
+                    (
+                        index
+                        for index, case in enumerate(unmatched_actual)
+                        if self._case_covers_selected(case, case_id)
+                    ),
+                    None,
+                )
+                if match_idx is not None:
+                    unmatched_actual.pop(match_idx)
                     continue
                 placeholder_status = (
                     "running" if batch["status"] == "running"
@@ -2093,6 +2102,27 @@ class Store:
             return original_case_id
         candidate = stem.rsplit("__", 1)[0].strip()
         return candidate or original_case_id
+
+    @staticmethod
+    def _case_covers_selected(actual_case: dict[str, Any], selected_id: str) -> bool:
+        selected_id = str(selected_id or "").strip()
+        if not selected_id:
+            return False
+        actual_ids = {
+            str(actual_case.get("case_id") or ""),
+            str(actual_case.get("original_case_id") or ""),
+        }
+        if selected_id in actual_ids:
+            return True
+        for actual_id in actual_ids:
+            if not actual_id:
+                continue
+            if actual_id in selected_id or selected_id in actual_id:
+                return True
+        trial_dir = str((actual_case.get("artifact_index") or {}).get("trialDir") or "")
+        if trial_dir and selected_id in trial_dir:
+            return True
+        return False
 
     def _worker_item(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
