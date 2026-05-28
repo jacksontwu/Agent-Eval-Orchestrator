@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
     from agent_eval_orchestrator.storage.store import Store
 
-RERUN_CONFIG_KEYS = {"datasetPath", "bitfunCliPath", "bitfunConfigDir", "jobsDir", "executorConfig"}
+RERUN_CONFIG_KEYS = ("datasetPath", "bitfunCliPath", "bitfunConfigDir", "jobsDir", "executorConfig")
 
 
 class RerunValidationError(Exception):
@@ -109,7 +109,9 @@ class RunRerunCoordinator:
                 continue
             value = config.get(key)
             if key == "executorConfig":
-                return value not in (None, {})
+                if value not in (None, {}):
+                    return True
+                continue
             if value not in (None, ""):
                 return True
         return False
@@ -153,8 +155,10 @@ class RunRerunCoordinator:
             or (DEFAULT_HARBOR_REPO / "jobs")
         )
         worker_ids = list(worker_shards.keys())
-        submitted_executor_config = config.get("executorConfig") or {}
-        if not isinstance(submitted_executor_config, dict):
+        submitted_executor_config = config.get("executorConfig")
+        if submitted_executor_config is None:
+            submitted_executor_config = {}
+        elif not isinstance(submitted_executor_config, dict):
             raise RerunValidationError(400, "executorConfig must be an object")
         body_config = self._filter_worker_maps(
             {
@@ -241,10 +245,15 @@ class RunRerunCoordinator:
 
     def _validate_executor_config(self, body_config: dict[str, Any]) -> None:
         if "nConcurrent" in body_config and body_config.get("nConcurrent") not in (None, ""):
-            try:
-                n_concurrent = int(body_config["nConcurrent"])
-            except (TypeError, ValueError) as exc:
-                raise RerunValidationError(400, "executorConfig.nConcurrent must be a positive integer") from exc
+            raw_n_concurrent = body_config["nConcurrent"]
+            if isinstance(raw_n_concurrent, bool):
+                raise RerunValidationError(400, "executorConfig.nConcurrent must be a positive integer")
+            if isinstance(raw_n_concurrent, int):
+                n_concurrent = raw_n_concurrent
+            elif isinstance(raw_n_concurrent, str) and raw_n_concurrent.strip().isdigit():
+                n_concurrent = int(raw_n_concurrent.strip())
+            else:
+                raise RerunValidationError(400, "executorConfig.nConcurrent must be a positive integer")
             if n_concurrent < 1:
                 raise RerunValidationError(400, "executorConfig.nConcurrent must be a positive integer")
 

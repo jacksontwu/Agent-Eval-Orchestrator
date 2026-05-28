@@ -611,7 +611,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._is_authorized():
             _json_response(self, {"error": "forbidden"}, 403)
             return
-        body = self._read_json()
+        try:
+            body = self._read_json()
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            _json_response(self, {"error": "request body must be valid JSON"}, 400)
+            return
         if path == "/api/task-templates":
             try:
                 item = self.store.create_task_template(

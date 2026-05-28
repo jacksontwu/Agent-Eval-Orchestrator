@@ -211,6 +211,27 @@ def test_post_rerun_exceptions_rejects_non_object_body_without_job(store, tmp_pa
     server.shutdown()
 
 
+def test_post_rerun_exceptions_rejects_invalid_json_without_job(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    server = start_test_server(store, tmp_path, 9898)
+    conn = HTTPConnection("127.0.0.1", 9898)
+    conn.request(
+        "POST",
+        f"/api/runs/{run['run_id']}/rerun-exceptions",
+        body="{",
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    assert resp.status == 400
+    assert payload["error"] == "request body must be valid JSON"
+    assert store.get_active_run_rerun_job(run["run_id"]) is None
+    server.shutdown()
+
+
 def test_post_rerun_exceptions_rejects_active_rerun(store, tmp_path):
     run, _ = seed_finished_run_with_cases(
         store,
