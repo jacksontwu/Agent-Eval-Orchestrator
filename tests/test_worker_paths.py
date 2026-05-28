@@ -3,7 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from agent_eval_orchestrator.controller.server import _default_harbor_for_worker, _default_uv_for_worker
+from agent_eval_orchestrator.controller.executor_config import (
+    _default_harbor_for_worker,
+    _default_uv_for_worker,
+)
 from agent_eval_orchestrator.core.worker_paths import (
     default_harbor_repo_from_shared_root,
     default_uv_binary_from_shared_root,
