@@ -670,6 +670,19 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div>
   </div>
+
+  <div class="modal hidden" id="rerunConfigModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>重跑 Exception 配置</h3>
+          <div class="subtle" id="rerunConfigModalSubtitle">调整参数后开始重跑</div>
+        </div>
+        <button class="modal-close" id="rerunConfigModalClose" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body" id="rerunConfigModalBody"></div>
+    </div>
+  </div>
   <div class="toast hidden" id="toast"></div>
 
   <script>
@@ -700,6 +713,7 @@ INDEX_HTML = """<!doctype html>
       syncPollTimer: null,
       syncJob: null,
       rerunPollTimer: null,
+      rerunConfig: null,
     };
 
     function badge(value, cls) {
@@ -1141,17 +1155,7 @@ INDEX_HTML = """<!doctype html>
         alert(reason);
         return;
       }
-      const workerCount = Object.keys(detail.workerGroups || {}).length || 1;
-      const msg = "将重跑 " + (detail.exceptionCount || 0) + " 个 exception case，分布在 " + workerCount + " 个 worker。是否继续？";
-      if (!confirm(msg)) return;
-      await api("/api/runs/" + encodeURIComponent(runId) + "/rerun-exceptions", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: "{}",
-      });
-      if (state.rerunPollTimer) clearInterval(state.rerunPollTimer);
-      state.rerunPollTimer = setInterval(() => pollRerunJob(runId), 2500);
-      await pollRerunJob(runId);
+      openRerunConfigModal(detail);
     }
 
     function renderTaskDetail() {
@@ -1456,6 +1460,133 @@ INDEX_HTML = """<!doctype html>
       if (state.syncPollTimer) clearInterval(state.syncPollTimer);
       pollSyncJob();
       state.syncPollTimer = setInterval(pollSyncJob, 2500);
+    }
+
+    function firstDefined(...values) {
+      for (const value of values) {
+        if (value !== undefined && value !== null && value !== "") return value;
+      }
+      return "";
+    }
+
+    function rerunInvolvedWorkerCount(detail) {
+      return (detail.workerGroups || []).filter(group =>
+        (group.cases || []).some(item => caseIsErrored(item))
+      ).length;
+    }
+
+    function buildRerunFormDefaults(detail) {
+      const template = detail.template || {};
+      const run = detail.run || {};
+      const executorConfig = template.executor_config || {};
+      const manifest = run.sync_manifest || {};
+      const primaryBatch = (detail.batches || []).find(
+        batch => String(batch.batch_kind || "primary") === "primary"
+      ) || {};
+      const batchOptions = primaryBatch.batch_options || {};
+      return {
+        executorKind: template.executor_kind || "harbor-docker",
+        agentName: executorConfig.agentName || "bitfun-cli",
+        nConcurrent: firstDefined(executorConfig.nConcurrent, batchOptions.concurrency, 1),
+        timeoutMultiplier: firstDefined(executorConfig.timeoutMultiplier, 1.0),
+        agentTimeoutMultiplier: firstDefined(executorConfig.agentTimeoutMultiplier, 3.0),
+        verifierTimeoutMultiplier: firstDefined(executorConfig.verifierTimeoutMultiplier, 2.0),
+        environmentBuildTimeoutMultiplier: firstDefined(executorConfig.environmentBuildTimeoutMultiplier, 1.5),
+        datasetPath: firstDefined(template.dataset_ref, manifest.datasetPath),
+        bitfunCliPath: firstDefined(manifest.bitfunCliPath),
+        bitfunConfigDir: firstDefined(manifest.bitfunConfigDir),
+        jobsDir: firstDefined(executorConfig.combinedJobsDir, "/root/projects/harbor/jobs"),
+      };
+    }
+
+    function closeRerunConfigModal() {
+      state.rerunConfig = null;
+      document.getElementById("rerunConfigModal").classList.add("hidden");
+    }
+
+    function openRerunConfigModal(detail) {
+      state.rerunConfig = {
+        runId: detail.run.run_id,
+        detail,
+        defaults: buildRerunFormDefaults(detail),
+        error: "",
+        submitting: false,
+      };
+      renderRerunConfigModal();
+      document.getElementById("rerunConfigModal").classList.remove("hidden");
+    }
+
+    function renderRerunConfigModal() {
+      const modalState = state.rerunConfig;
+      const body = document.getElementById("rerunConfigModalBody");
+      if (!modalState) {
+        body.innerHTML = "";
+        return;
+      }
+      const detail = modalState.detail;
+      const defaults = modalState.defaults;
+      const submitLabel = modalState.submitting ? "提交中…" : "确认重跑";
+      document.getElementById("rerunConfigModalSubtitle").textContent =
+        (detail.run?.display_name || "-") + " · exception: " + (detail.exceptionCount || 0);
+      body.innerHTML = '' +
+        '<div class="detail-grid" style="margin-bottom:16px">' +
+          '<div class="stat"><div class="subtle">Task</div><strong class="subtle">' + esc(detail.run?.display_name || "-") + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Exception cases</div><strong>' + esc(detail.exceptionCount || 0) + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Workers</div><strong>' + esc(rerunInvolvedWorkerCount(detail)) + '</strong></div>' +
+        '</div>' +
+        (modalState.error ? '<div class="empty" style="color:var(--bad);padding:10px 0">' + esc(modalState.error) + '</div>' : '') +
+        '<form id="rerunConfigForm">' +
+          '<div class="detail-grid" style="margin-bottom:16px">' +
+            '<div class="field"><label>Executor</label><input name="executorKind" value="' + esc(defaults.executorKind) + '" readonly /></div>' +
+            '<div class="field"><label>Agent Name</label><input name="agentName" value="' + esc(defaults.agentName) + '" readonly /></div>' +
+            '<div class="field"><label>Per Worker Concurrency</label><input name="nConcurrent" type="number" min="1" value="' + esc(defaults.nConcurrent) + '" required /></div>' +
+          '</div>' +
+          '<div class="detail-grid" style="margin-bottom:16px">' +
+            '<div class="field"><label>Timeout Multiplier</label><input name="timeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.timeoutMultiplier) + '" /></div>' +
+            '<div class="field"><label>Agent Timeout Multiplier</label><input name="agentTimeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.agentTimeoutMultiplier) + '" /></div>' +
+            '<div class="field"><label>Verifier Timeout Multiplier</label><input name="verifierTimeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.verifierTimeoutMultiplier) + '" /></div>' +
+            '<div class="field"><label>Environment Build Multiplier</label><input name="environmentBuildTimeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.environmentBuildTimeoutMultiplier) + '" /></div>' +
+          '</div>' +
+          '<div class="detail-grid" style="margin-bottom:16px">' +
+            '<div class="field"><label>Dataset Path</label><input name="datasetPath" value="' + esc(defaults.datasetPath) + '" required /></div>' +
+            '<div class="field"><label>BitFun CLI Path</label><input name="bitfunCliPath" value="' + esc(defaults.bitfunCliPath) + '" required /></div>' +
+            '<div class="field"><label>BitFun Config Dir</label><input name="bitfunConfigDir" value="' + esc(defaults.bitfunConfigDir) + '" required /></div>' +
+            '<div class="field"><label>Jobs Dir</label><input name="jobsDir" value="' + esc(defaults.jobsDir) + '" required /></div>' +
+          '</div>' +
+          '<div class="actions">' +
+            '<button class="primary" type="submit"' + (modalState.submitting ? ' disabled' : '') + '>' + submitLabel + '</button>' +
+            '<button class="ghost" type="button" id="cancelRerunConfigBtn"' + (modalState.submitting ? ' disabled' : '') + '>取消</button>' +
+          '</div>' +
+        '</form>';
+      document.getElementById("cancelRerunConfigBtn").addEventListener("click", closeRerunConfigModal);
+      document.getElementById("rerunConfigForm").addEventListener("submit", submitRerunConfigForm);
+    }
+
+    async function submitRerunConfigForm(event) {
+      event.preventDefault();
+      const modalState = state.rerunConfig;
+      if (!modalState || modalState.submitting) return;
+      const payload = collectTaskConfigPayload(event.target);
+      modalState.submitting = true;
+      modalState.error = "";
+      renderRerunConfigModal();
+      try {
+        await api("/api/runs/" + encodeURIComponent(modalState.runId) + "/rerun-exceptions", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+        });
+        closeRerunConfigModal();
+        if (state.rerunPollTimer) clearInterval(state.rerunPollTimer);
+        state.rerunPollTimer = setInterval(() => pollRerunJob(modalState.runId), 2500);
+        await pollRerunJob(modalState.runId);
+      } catch (error) {
+        if (state.rerunConfig) {
+          state.rerunConfig.submitting = false;
+          state.rerunConfig.error = formatApiError(error);
+          renderRerunConfigModal();
+        }
+      }
     }
 
     function closePreviewModal() {
@@ -2011,25 +2142,16 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    function collectCreateFormPayload(form) {
+    function collectTaskConfigPayload(form) {
       const data = new FormData(form);
-      const workerIds = data.getAll("workerIds").map(value => String(value));
-      const selectedCaseIds = String(data.get("selectedCaseIds") || "")
-        .split(/[\\n,]/)
-        .map(item => item.trim())
-        .filter(Boolean);
-      const concurrency = Number(data.get("nConcurrent") || 1);
       return {
-        name: String(data.get("name") || "").trim(),
         datasetPath: String(data.get("datasetPath") || "").trim(),
         bitfunCliPath: String(data.get("bitfunCliPath") || "").trim(),
         bitfunConfigDir: String(data.get("bitfunConfigDir") || "").trim(),
         jobsDir: String(data.get("jobsDir") || "/root/projects/harbor/jobs").trim(),
-        workerIds,
-        selectedCaseIds,
         executorConfig: {
-          agentName: "bitfun-cli",
-          nConcurrent: concurrency,
+          agentName: String(data.get("agentName") || "bitfun-cli").trim(),
+          nConcurrent: Number(data.get("nConcurrent") || 1),
           timeoutMultiplier: parsePositiveNumber(data.get("timeoutMultiplier"), 1.0),
           agentTimeoutMultiplier: parsePositiveNumber(data.get("agentTimeoutMultiplier"), 3.0),
           verifierTimeoutMultiplier: parsePositiveNumber(data.get("verifierTimeoutMultiplier"), 2.0),
@@ -2038,6 +2160,21 @@ INDEX_HTML = """<!doctype html>
             1.5,
           ),
         },
+      };
+    }
+
+    function collectCreateFormPayload(form) {
+      const data = new FormData(form);
+      const workerIds = data.getAll("workerIds").map(value => String(value));
+      const selectedCaseIds = String(data.get("selectedCaseIds") || "")
+        .split(/[\\n,]/)
+        .map(item => item.trim())
+        .filter(Boolean);
+      return {
+        ...collectTaskConfigPayload(form),
+        name: String(data.get("name") || "").trim(),
+        workerIds,
+        selectedCaseIds,
       };
     }
 
@@ -2099,6 +2236,12 @@ INDEX_HTML = """<!doctype html>
     document.getElementById("previewModal").addEventListener("click", (event) => {
       if (event.target.id === "previewModal") {
         closePreviewModal();
+      }
+    });
+    document.getElementById("rerunConfigModalClose").addEventListener("click", closeRerunConfigModal);
+    document.getElementById("rerunConfigModal").addEventListener("click", (event) => {
+      if (event.target.id === "rerunConfigModal" && !state.rerunConfig?.submitting) {
+        closeRerunConfigModal();
       }
     });
 
