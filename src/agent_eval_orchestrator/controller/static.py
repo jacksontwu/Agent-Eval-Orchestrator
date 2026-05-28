@@ -1101,14 +1101,19 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    async function openGlobalHarborViewer() {
+    async function openGlobalHarborViewer(jobsDir) {
       // Open a placeholder window immediately so browsers keep this user-initiated.
       const popup = window.open("", "_blank");
+      const payload = {};
+      const normalizedJobsDir = String(jobsDir || "").trim();
+      if (normalizedJobsDir) {
+        payload.jobsDir = normalizedJobsDir;
+      }
       try {
         const info = await api("/api/harbor-viewer/global", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: "{}",
+          body: JSON.stringify(payload),
         });
         if (!info.available) {
           if (popup) popup.close();
@@ -1200,7 +1205,8 @@ INDEX_HTML = """<!doctype html>
       });
       const globalViewerBtn = root.querySelector("#openGlobalViewerBtn");
       if (globalViewerBtn) {
-        globalViewerBtn.addEventListener("click", openGlobalHarborViewer);
+        const jobsDir = (template && template.executor_config && template.executor_config.combinedJobsDir) || "";
+        globalViewerBtn.addEventListener("click", () => openGlobalHarborViewer(jobsDir));
       }
       const rerunBtn = root.querySelector("#rerunExceptionsBtn");
       if (rerunBtn) {

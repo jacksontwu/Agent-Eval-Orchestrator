@@ -50,6 +50,12 @@ DEFAULT_JOBS_DIR = DEFAULT_HARBOR_REPO / "jobs"
 DEFAULT_IMPORTED_JOBS_DIRNAME = "imported-jobs"
 
 
+def resolve_global_harbor_viewer_paths(jobs_dir: str | None = None) -> tuple[Path, Path]:
+    raw = str(jobs_dir or DEFAULT_JOBS_DIR).strip() or str(DEFAULT_JOBS_DIR)
+    jobs_path = Path(raw).expanduser().resolve()
+    return jobs_path.parent, jobs_path
+
+
 def _is_subpath(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -231,22 +237,36 @@ class Handler(BaseHTTPRequestHandler):
             merged_names.extend(name for name, _ in grouped_sources)
         return merged_names
 
-    def _ensure_global_harbor_viewer(self) -> dict[str, object]:
-        jobs_dir = DEFAULT_JOBS_DIR
-        jobs_dir.mkdir(parents=True, exist_ok=True)
+    def _viewer_public_url(self) -> str:
+        host = self.headers.get("Host", "").split(":")[0] or "127.0.0.1"
+        return f"http://{host}:{GLOBAL_VIEWER_PORT}/"
+
+    def _ensure_global_harbor_viewer(self, jobs_dir: str | None = None) -> dict[str, object]:
+        harbor_repo, jobs_path = resolve_global_harbor_viewer_paths(jobs_dir)
         try:
             with request.urlopen(f"http://127.0.0.1:{GLOBAL_VIEWER_PORT}/api/health", timeout=1):
                 return {
                     "available": True,
-                    "url": f"http://{self.headers.get('Host', '').split(':')[0] or '127.0.0.1'}:{GLOBAL_VIEWER_PORT}/",
-                    "jobsDir": str(jobs_dir),
+                    "url": self._viewer_public_url(),
+                    "jobsDir": str(jobs_path),
+                    "harborRepo": str(harbor_repo),
                     "port": GLOBAL_VIEWER_PORT,
                 }
         except Exception:
             pass
 
-        self._rebuild_merged_jobs(jobs_dir)
-        normalize_jobs_dir(jobs_dir)
+        try:
+            jobs_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return {
+                "available": False,
+                "reason": f"无法访问 Jobs Dir: {jobs_path} ({exc})",
+                "jobsDir": str(jobs_path),
+                "harborRepo": str(harbor_repo),
+            }
+
+        self._rebuild_merged_jobs(jobs_path)
+        normalize_jobs_dir(jobs_path)
 
         if self.global_viewer_process and self.global_viewer_process.poll() is None:
             self.global_viewer_process.terminate()
@@ -256,7 +276,10 @@ class Handler(BaseHTTPRequestHandler):
         command = [
             "/bin/bash",
             "-lc",
-            f"cd {DEFAULT_HARBOR_REPO} && uv run harbor view --port {GLOBAL_VIEWER_PORT} --host 0.0.0.0 ./jobs/",
+            (
+                f"cd {harbor_repo} && "
+                f"uv run harbor view {jobs_path} --port {GLOBAL_VIEWER_PORT} --host 0.0.0.0 --no-build"
+            ),
         ]
         self.__class__.global_viewer_process = subprocess.Popen(
             command,
@@ -270,13 +293,19 @@ class Handler(BaseHTTPRequestHandler):
                 with request.urlopen(f"http://127.0.0.1:{GLOBAL_VIEWER_PORT}/api/health", timeout=1):
                     return {
                         "available": True,
-                        "url": f"http://{self.headers.get('Host', '').split(':')[0] or '127.0.0.1'}:{GLOBAL_VIEWER_PORT}/",
-                        "jobsDir": str(jobs_dir),
+                        "url": self._viewer_public_url(),
+                        "jobsDir": str(jobs_path),
+                        "harborRepo": str(harbor_repo),
                         "port": GLOBAL_VIEWER_PORT,
                     }
             except Exception:
                 time.sleep(0.5)
-        return {"available": False, "reason": "Harbor viewer did not become ready", "jobsDir": str(jobs_dir)}
+        return {
+            "available": False,
+            "reason": "Harbor viewer did not become ready",
+            "jobsDir": str(jobs_path),
+            "harborRepo": str(harbor_repo),
+        }
 
     def _is_loopback_client(self) -> bool:
         host = self.client_address[0]
@@ -482,7 +511,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/harbor-viewer/global":
-            _json_response(self, self._ensure_global_harbor_viewer())
+            jobs_dir = str(qs.get("jobsDir", [""])[0]).strip() or None
+            _json_response(self, self._ensure_global_harbor_viewer(jobs_dir))
             return
         if path == "/api/files/read":
             raw_path = str(qs.get("path", [""])[0]).strip()
@@ -773,7 +803,8 @@ class Handler(BaseHTTPRequestHandler):
                 _json_response(self, {"error": str(exc)}, 400)
             return
         if path == "/api/harbor-viewer/global":
-            _json_response(self, self._ensure_global_harbor_viewer())
+            jobs_dir = str(body.get("jobsDir") or "").strip() or None
+            _json_response(self, self._ensure_global_harbor_viewer(jobs_dir))
             return
         if path == "/api/runs":
             try:
