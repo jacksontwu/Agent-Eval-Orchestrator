@@ -104,7 +104,15 @@ class RunRerunCoordinator:
     def _has_applicable_config(self, config: dict[str, Any] | None) -> bool:
         if not config:
             return False
-        return any(key in config for key in RERUN_CONFIG_KEYS)
+        for key in RERUN_CONFIG_KEYS:
+            if key not in config:
+                continue
+            value = config.get(key)
+            if key == "executorConfig":
+                return value not in (None, {})
+            if value not in (None, ""):
+                return True
+        return False
 
     def _apply_config(
         self,
@@ -155,6 +163,7 @@ class RunRerunCoordinator:
             },
             worker_ids,
         )
+        self._validate_executor_config(body_config)
         workers = self.store.list_workers()
         workers_by_id = {str(item["worker_id"]): item for item in workers}
 
@@ -229,3 +238,27 @@ class RunRerunCoordinator:
                 continue
             filtered[key] = value
         return filtered
+
+    def _validate_executor_config(self, body_config: dict[str, Any]) -> None:
+        if "nConcurrent" in body_config and body_config.get("nConcurrent") not in (None, ""):
+            try:
+                n_concurrent = int(body_config["nConcurrent"])
+            except (TypeError, ValueError) as exc:
+                raise RerunValidationError(400, "executorConfig.nConcurrent must be a positive integer") from exc
+            if n_concurrent < 1:
+                raise RerunValidationError(400, "executorConfig.nConcurrent must be a positive integer")
+
+        for key in (
+            "timeoutMultiplier",
+            "agentTimeoutMultiplier",
+            "verifierTimeoutMultiplier",
+            "environmentBuildTimeoutMultiplier",
+        ):
+            if key not in body_config or body_config.get(key) in (None, ""):
+                continue
+            try:
+                value = float(body_config[key])
+            except (TypeError, ValueError) as exc:
+                raise RerunValidationError(400, f"executorConfig.{key} must be a positive number") from exc
+            if value <= 0:
+                raise RerunValidationError(400, f"executorConfig.{key} must be a positive number")

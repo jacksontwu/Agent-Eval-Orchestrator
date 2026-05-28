@@ -233,6 +233,75 @@ def test_start_rerun_rejects_malformed_executor_config_before_job_creation(store
     assert store.get_active_run_rerun_job(run["run_id"]) is None
 
 
+def test_start_rerun_rejects_invalid_executor_numbers_before_job_creation(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    _make_worker_local(store, tmp_path)
+    assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    with pytest.raises(RerunValidationError) as exc:
+        coordinator.start_rerun(
+            run["run_id"],
+            config={
+                "datasetPath": assets["datasetPath"],
+                "bitfunCliPath": assets["bitfunCliPath"],
+                "bitfunConfigDir": assets["bitfunConfigDir"],
+                "jobsDir": assets["jobsDir"],
+                "executorConfig": {
+                    "nConcurrent": -1,
+                    "timeoutMultiplier": 1.0,
+                },
+            },
+        )
+
+    assert exc.value.code == 400
+    assert exc.value.message == "executorConfig.nConcurrent must be a positive integer"
+    assert store.get_active_run_rerun_job(run["run_id"]) is None
+
+    with pytest.raises(RerunValidationError) as exc:
+        coordinator.start_rerun(
+            run["run_id"],
+            config={
+                "datasetPath": assets["datasetPath"],
+                "bitfunCliPath": assets["bitfunCliPath"],
+                "bitfunConfigDir": assets["bitfunConfigDir"],
+                "jobsDir": assets["jobsDir"],
+                "executorConfig": {
+                    "nConcurrent": 1,
+                    "timeoutMultiplier": 0,
+                },
+            },
+        )
+
+    assert exc.value.code == 400
+    assert exc.value.message == "executorConfig.timeoutMultiplier must be a positive number"
+    assert store.get_active_run_rerun_job(run["run_id"]) is None
+
+
+def test_start_rerun_empty_executor_config_preserves_existing_behavior(store):
+    run, parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom"},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    original_template = store.get_task_template(run["template_id"])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    result = coordinator.start_rerun(run["run_id"], config={"executorConfig": {}})
+
+    template = store.get_task_template(run["template_id"])
+    assert template["dataset_ref"] == original_template["dataset_ref"]
+    assert template["executor_config"] == original_template["executor_config"]
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["batch_options"] == parent["batch_options"]
+
+
 def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,
