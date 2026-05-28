@@ -171,6 +171,9 @@ class RunRerunCoordinator:
                 body_config=body_config,
                 jobs_dir=jobs_dir,
             )
+            for key, value in body_config.items():
+                if key.endswith("ByWorker") and isinstance(value, dict) and key not in executor_config:
+                    executor_config[key] = value
             manifest = build_sync_manifest(
                 run_id=str(run["run_id"]),
                 dataset_path=dataset_path.resolve(),

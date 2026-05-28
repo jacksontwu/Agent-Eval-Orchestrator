@@ -252,6 +252,10 @@ def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path)
                 "worker-a": {"PA": "1"},
                 "worker-b": {"PB": "2"},
             },
+            "customByWorker": {
+                "worker-a": {"custom": "a"},
+                "worker-b": {"custom": "b"},
+            },
         },
     )
     assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
@@ -278,5 +282,6 @@ def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path)
         "agentKwargsByWorker",
         "agentEnvByWorker",
         "processEnvByWorker",
+        "customByWorker",
     ):
         assert "worker-b" not in executor_config[key]
