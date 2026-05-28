@@ -14,6 +14,7 @@ Example:
   python3 scripts/aeo-run-stats.py run-0e7535baa043
   python3 scripts/aeo-run-stats.py run-e731483ce0b7 --json
   python3 scripts/aeo-run-stats.py run-0e7535baa043 --primary-only
+  python3 scripts/aeo-run-stats.py run-0e7535baa043 --active-exception-only
 """
 
 from __future__ import annotations
@@ -167,6 +168,12 @@ def parse_batch_row(row: sqlite3.Row) -> dict[str, Any]:
     if not item.get("batch_kind"):
         item["batch_kind"] = "primary"
     return item
+
+
+def is_active_rerun_batch(batch: dict[str, Any] | None) -> bool:
+    if not batch:
+        return False
+    return str(batch.get("status") or "") in ACTIVE_RERUN_STATUSES
 
 
 def pick_rerun_batch(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -479,6 +486,7 @@ def collect_run_stats(
     controller_url: str | None,
     auth_token: str,
     primary_only: bool = False,
+    active_exception_only: bool = False,
 ) -> dict[str, Any]:
     plan = load_run_plan(db_path, run_id)
     worker_rows: list[dict[str, Any]] = []
@@ -487,6 +495,63 @@ def collect_run_stats(
     for item in plan["primary_batches"]:
         worker = item["worker"]
         shared_root = worker_shared_root(worker)
+        rerun_batch = item.get("rerun_batch")
+
+        if active_exception_only:
+            if not is_active_rerun_batch(rerun_batch):
+                continue
+            rerun_batch_id = str(rerun_batch["batch_id"])
+            rerun_job_dir = remote_job_dir(
+                shared_root=shared_root,
+                owner=item["owner"],
+                run_id=run_id,
+                batch_id=rerun_batch_id,
+            )
+            try:
+                rerun_stats = ssh_analyze_job(
+                    worker=worker,
+                    job_dir=rerun_job_dir,
+                    ssh_config=ssh_config,
+                    ssh_user=ssh_user,
+                    ssh_key=ssh_key,
+                    connect_timeout_sec=connect_timeout_sec,
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "worker_id": item["worker_id"],
+                        "batch_id": rerun_batch_id,
+                        "phase": "exception_rerun",
+                        "error": str(exc),
+                    }
+                )
+                continue
+
+            rerun_case_ids = list(rerun_batch["selected_case_ids"])
+            rerun_info = {
+                "batch_id": rerun_batch_id,
+                "parent_batch_id": item["batch_id"],
+                "batch_status": str(rerun_batch.get("status") or ""),
+                "rerun_case_ids": rerun_case_ids,
+                "rerun_case_count": len(rerun_case_ids),
+                "stats": rerun_stats,
+            }
+            chosen_stats = summarize_case_map(rerun_case_ids, rerun_stats.get("cases") or {})
+            worker_rows.append(
+                {
+                    "worker_id": item["worker_id"],
+                    "primary_batch_id": item["batch_id"],
+                    "batch_id": rerun_batch_id,
+                    "expected_cases": len(rerun_case_ids),
+                    "primary": None,
+                    "exception_rerun": rerun_info,
+                    "effective": chosen_stats,
+                    "stats": chosen_stats,
+                    **chosen_stats,
+                }
+            )
+            continue
+
         primary_job_dir = remote_job_dir(
             shared_root=shared_root,
             owner=item["owner"],
@@ -514,7 +579,6 @@ def collect_run_stats(
 
         rerun_info = None
         rerun_stats = None
-        rerun_batch = item.get("rerun_batch")
         if rerun_batch and not primary_only:
             rerun_batch_id = str(rerun_batch["batch_id"])
             rerun_job_dir = remote_job_dir(
@@ -573,13 +637,18 @@ def collect_run_stats(
             }
         )
 
-    overall_primary = aggregate_worker_rows(worker_rows, key="primary")
-    overall_effective = aggregate_worker_rows(worker_rows, key="effective") if not primary_only else overall_primary
-    rerun_rows = [row["exception_rerun"]["stats"] for row in worker_rows if row.get("exception_rerun")]
-    overall_rerun = aggregate_worker_rows(
-        [{"stats": stats} for stats in rerun_rows],
-        key="stats",
-    ) if rerun_rows else None
+    if active_exception_only:
+        overall_primary = None
+        overall_effective = aggregate_worker_rows(worker_rows, key="stats")
+        overall_rerun = overall_effective
+    else:
+        overall_primary = aggregate_worker_rows(worker_rows, key="primary")
+        overall_effective = aggregate_worker_rows(worker_rows, key="effective") if not primary_only else overall_primary
+        rerun_rows = [row["exception_rerun"]["stats"] for row in worker_rows if row.get("exception_rerun")]
+        overall_rerun = aggregate_worker_rows(
+            [{"stats": stats} for stats in rerun_rows],
+            key="stats",
+        ) if rerun_rows else None
 
     controller_task = None
     if controller_url:
@@ -592,6 +661,7 @@ def collect_run_stats(
         "run_id": run_id,
         "queried_at": datetime.now(timezone.utc).isoformat(),
         "primary_only": primary_only,
+        "active_exception_only": active_exception_only,
         "rerun": {
             "status": rerun_status,
             "job_id": plan["run"].get("rerun_job_id"),
@@ -661,7 +731,9 @@ def print_human_report(payload: dict[str, Any]) -> None:
             phase = f" phase={item['phase']}" if item.get("phase") else ""
             print(f"  - worker={item['worker_id']} batch={item['batch_id']}{phase}: {item['error']}")
 
-    if payload.get("primary_only"):
+    if payload.get("active_exception_only"):
+        _print_stats_block("Overall (active exception rerun only)", payload.get("overall") or {})
+    elif payload.get("primary_only"):
         _print_stats_block("Overall (primary only)", payload.get("overall") or {})
     else:
         _print_stats_block("Overall (effective, primary + exception rerun merge)", payload.get("overall") or {})
@@ -751,6 +823,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Ignore exception rerun batches and report primary Harbor jobs only",
     )
+    parser.add_argument(
+        "--active-exception-only",
+        action="store_true",
+        help=(
+            "Only query exception rerun Harbor jobs whose batch status is "
+            "pending_sync, queued, or running; skip primary jobs"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -767,6 +847,9 @@ def main() -> int:
     if not ssh_key.exists():
         ssh_key = None
 
+    if args.primary_only and args.active_exception_only:
+        raise SystemExit("--primary-only and --active-exception-only are mutually exclusive")
+
     payload = collect_run_stats(
         run_id=args.run_id,
         db_path=db_path,
@@ -777,6 +860,7 @@ def main() -> int:
         controller_url=None if args.no_controller else args.controller_url,
         auth_token=args.auth_token,
         primary_only=args.primary_only,
+        active_exception_only=args.active_exception_only,
     )
 
     if args.json:

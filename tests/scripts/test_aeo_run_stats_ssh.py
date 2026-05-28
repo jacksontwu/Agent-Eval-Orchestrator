@@ -16,6 +16,86 @@ def _load_run_stats_module():
     return module
 
 
+def test_is_active_rerun_batch() -> None:
+    mod = _load_run_stats_module()
+
+    assert mod.is_active_rerun_batch({"status": "running"}) is True
+    assert mod.is_active_rerun_batch({"status": "queued"}) is True
+    assert mod.is_active_rerun_batch({"status": "pending_sync"}) is True
+    assert mod.is_active_rerun_batch({"status": "succeeded"}) is False
+    assert mod.is_active_rerun_batch(None) is False
+
+
+def test_collect_run_stats_active_exception_only_skips_primary_ssh(monkeypatch, tmp_path: Path) -> None:
+    mod = _load_run_stats_module()
+    ssh_calls: list[str] = []
+
+    def fake_load_run_plan(_db_path, _run_id):
+        return {
+            "run": {"rerun_status": "running", "rerun_job_id": "job-1"},
+            "rerun_job": None,
+            "primary_batches": [
+                {
+                    "batch_id": "batch-primary",
+                    "owner": "alice",
+                    "worker_id": "worker-1",
+                    "worker": {"worker_id": "worker-1", "capabilities": {}},
+                    "expected_case_ids": ["case-a", "case-b"],
+                    "expected_cases": 2,
+                    "rerun_batch": {
+                        "batch_id": "batch-rerun",
+                        "status": "running",
+                        "selected_case_ids": ["case-a"],
+                    },
+                },
+                {
+                    "batch_id": "batch-primary-2",
+                    "owner": "alice",
+                    "worker_id": "worker-2",
+                    "worker": {"worker_id": "worker-2", "capabilities": {}},
+                    "expected_case_ids": ["case-c"],
+                    "expected_cases": 1,
+                    "rerun_batch": {
+                        "batch_id": "batch-rerun-done",
+                        "status": "succeeded",
+                        "selected_case_ids": ["case-c"],
+                    },
+                },
+            ],
+        }
+
+    def fake_ssh_analyze_job(*, worker, job_dir, **kwargs):
+        ssh_calls.append(job_dir)
+        return {
+            "cases": {
+                "case-a": {"status": "passed", "scored": True, "has_result": True},
+            }
+        }
+
+    monkeypatch.setattr(mod, "load_run_plan", fake_load_run_plan)
+    monkeypatch.setattr(mod, "ssh_analyze_job", fake_ssh_analyze_job)
+
+    payload = mod.collect_run_stats(
+        run_id="run-test",
+        db_path=tmp_path / "state.sqlite3",
+        ssh_config=None,
+        ssh_user="djn",
+        ssh_key=None,
+        connect_timeout_sec=5,
+        controller_url=None,
+        auth_token="",
+        active_exception_only=True,
+    )
+
+    assert len(payload["workers"]) == 1
+    assert payload["workers"][0]["batch_id"] == "batch-rerun"
+    assert payload["active_exception_only"] is True
+    assert payload["overall"]["total"] == 1
+    assert payload["overall"]["completed"] == 1
+    assert len(ssh_calls) == 1
+    assert ssh_calls[0].endswith("/batch-rerun/harbor/jobs/batch-rerun")
+
+
 def test_build_ssh_target_keeps_host_alias_out_of_prefix(tmp_path: Path) -> None:
     mod = _load_run_stats_module()
     ssh_config = tmp_path / "config"
