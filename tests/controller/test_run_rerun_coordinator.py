@@ -205,3 +205,58 @@ def test_start_rerun_config_validation_happens_before_job_creation(store, tmp_pa
     assert "case directory not found: exc-a" in exc.value.message
     assert store.get_active_run_rerun_job(run["run_id"]) is None
     assert store.get_task_template(run["template_id"])["dataset_ref"] == original_template["dataset_ref"]
+
+
+def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom"},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    _make_worker_local(store, tmp_path)
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {
+            "useAssetSync": True,
+            "uvBinaryByWorker": {
+                "worker-a": "/old/uv-a",
+                "worker-b": "/old/uv-b",
+            },
+            "harborRepoPathByWorker": {
+                "worker-a": "/old/harbor-a",
+                "worker-b": "/old/harbor-b",
+            },
+            "datasetPathByWorker": {
+                "worker-a": "/old/dataset-a",
+                "worker-b": "/old/dataset-b",
+            },
+            "mountsByWorker": {
+                "worker-a": [{"source": "/old/source-a"}],
+                "worker-b": [{"source": "/old/source-b"}],
+            },
+        },
+    )
+    assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    coordinator.start_rerun(
+        run["run_id"],
+        config={
+            "datasetPath": assets["datasetPath"],
+            "bitfunCliPath": assets["bitfunCliPath"],
+            "bitfunConfigDir": assets["bitfunConfigDir"],
+            "jobsDir": assets["jobsDir"],
+            "executorConfig": {"nConcurrent": 2},
+        },
+    )
+
+    executor_config = store.get_task_template(run["template_id"])["executor_config"]
+    for key in (
+        "uvBinaryByWorker",
+        "harborRepoPathByWorker",
+        "datasetPathByWorker",
+        "mountsByWorker",
+    ):
+        assert "worker-b" not in executor_config[key]

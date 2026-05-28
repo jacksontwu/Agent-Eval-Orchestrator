@@ -736,8 +736,11 @@ class Store:
         self,
         template_id: str,
         patch: dict[str, Any],
+        *,
+        replace_keys: set[str] | None = None,
     ) -> dict[str, Any]:
         now = now_iso()
+        replace_keys = replace_keys or set()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -748,7 +751,7 @@ class Store:
                 raise RuntimeError("template not found")
             config = json.loads(row["executor_config_json"])
             for key, value in patch.items():
-                if isinstance(value, dict) and isinstance(config.get(key), dict):
+                if key not in replace_keys and isinstance(value, dict) and isinstance(config.get(key), dict):
                     merged = dict(config[key])
                     merged.update(value)
                     config[key] = merged

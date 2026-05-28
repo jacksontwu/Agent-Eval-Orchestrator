@@ -187,7 +187,16 @@ class RunRerunCoordinator:
                 if key in existing_entry:
                     entry[key] = existing_entry[key]
 
-        self.store.update_task_template_executor_config(str(template["template_id"]), executor_config)
+        self.store.update_task_template_executor_config(
+            str(template["template_id"]),
+            executor_config,
+            replace_keys={
+                "uvBinaryByWorker",
+                "harborRepoPathByWorker",
+                "datasetPathByWorker",
+                "mountsByWorker",
+            },
+        )
         self.store.update_task_template_dataset_ref(str(template["template_id"]), str(dataset_path.resolve()))
         self.store.update_run_sync_fields(
             run_id=str(run["run_id"]),
