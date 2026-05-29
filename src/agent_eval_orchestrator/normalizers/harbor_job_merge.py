@@ -28,6 +28,9 @@ def _trial_case_id(trial_dir: Path) -> str:
     result_path = trial_dir / "result.json"
     if result_path.exists():
         payload = json.loads(result_path.read_text(encoding="utf-8"))
+        task_name = str(payload.get("task_name") or "").strip()
+        if task_name:
+            return task_name
         trial_name = str(payload.get("trial_name") or trial_dir.name).strip()
     else:
         trial_name = trial_dir.name
