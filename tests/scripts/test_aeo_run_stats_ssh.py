@@ -16,6 +16,42 @@ def _load_run_stats_module():
     return module
 
 
+def test_case_ids_match_long_selected_and_short_harbor_key() -> None:
+    mod = _load_run_stats_module()
+    long_selected = (
+        "instance_ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-"
+        "v7eee2454f617569fd6889f2211f75bc02a35f9f8"
+    )
+    short_harbor = "instance_ansible__ansible-12734f"
+
+    assert mod.case_ids_match(short_harbor, long_selected) is True
+    assert mod.lookup_case_entry(long_selected, {short_harbor: {"status": "passed"}}) == {
+        "status": "passed",
+    }
+
+
+def test_summarize_case_map_matches_harbor_prefix_keys() -> None:
+    mod = _load_run_stats_module()
+    long_selected = (
+        "instance_ansible__ansible-12734fa21c08a0ce8c84e533abdc560db2eb1955-"
+        "v7eee2454f617569fd6889f2211f75bc02a35f9f8"
+    )
+    case_map = {
+        "instance_ansible__ansible-12734f": {
+            "status": "passed",
+            "scored": True,
+            "has_result": True,
+        }
+    }
+
+    stats = mod.summarize_case_map([long_selected], case_map)
+
+    assert stats["total"] == 1
+    assert stats["completed"] == 1
+    assert stats["pending"] == 0
+    assert stats["score_counts"]["scored"] == 1
+
+
 def test_is_active_rerun_batch() -> None:
     mod = _load_run_stats_module()
 
@@ -67,9 +103,13 @@ def test_collect_run_stats_active_exception_only_skips_primary_ssh(monkeypatch, 
     def fake_ssh_analyze_job(*, worker, job_dir, **kwargs):
         ssh_calls.append(job_dir)
         return {
+            "completed": 1,
+            "running": 0,
+            "pending": 0,
+            "started_count": 1,
             "cases": {
                 "case-a": {"status": "passed", "scored": True, "has_result": True},
-            }
+            },
         }
 
     monkeypatch.setattr(mod, "load_run_plan", fake_load_run_plan)

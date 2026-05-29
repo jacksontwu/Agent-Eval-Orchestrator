@@ -362,11 +362,38 @@ def ssh_analyze_job(
     return json.loads(result.stdout.strip())
 
 
+def case_ids_match(actual_id: str, expected_id: str) -> bool:
+    """Match Harbor trial-derived case ids to DB selected_case_ids (exact or prefix)."""
+    actual_id = str(actual_id or "").strip()
+    expected_id = str(expected_id or "").strip()
+    if not actual_id or not expected_id:
+        return False
+    if actual_id == expected_id:
+        return True
+    return actual_id in expected_id or expected_id in actual_id
+
+
+def lookup_case_entry(
+    expected_case_id: str,
+    case_map: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if expected_case_id in case_map:
+        return case_map[expected_case_id]
+    for harbor_case_id, entry in case_map.items():
+        if case_ids_match(harbor_case_id, expected_case_id):
+            return entry
+    return None
+
+
 def summarize_case_map(expected_case_ids: list[str], case_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
     status_counts: Counter[str] = Counter()
     score_counts: Counter[str] = Counter()
     for case_id in expected_case_ids:
-        entry = case_map.get(case_id) or {"status": "pending", "scored": None, "has_result": False}
+        entry = lookup_case_entry(case_id, case_map) or {
+            "status": "pending",
+            "scored": None,
+            "has_result": False,
+        }
         status = str(entry.get("status") or "pending")
         if status == "in_progress":
             status_counts["in_progress_or_pending"] += 1
@@ -383,7 +410,11 @@ def summarize_case_map(expected_case_ids: list[str], case_map: dict[str, dict[st
         status_counts[key]
         for key in ("passed", "failed", "exception", "finished_no_reward")
     )
-    running = sum(1 for case_id in expected_case_ids if case_map.get(case_id, {}).get("status") == "in_progress")
+    running = sum(
+        1
+        for case_id in expected_case_ids
+        if (lookup_case_entry(case_id, case_map) or {}).get("status") == "in_progress"
+    )
     pending = status_counts.get("pending", 0)
     finished_with_result = int(status_counts.get("passed", 0) + status_counts.get("failed", 0))
     pass_rate = None
@@ -417,26 +448,31 @@ def merge_effective_cases(
     rerun_cases = rerun_cases or {}
     for case_id in expected_case_ids:
         if case_id in rerun_ids:
-            if case_id in rerun_cases:
-                merged[case_id] = {**rerun_cases[case_id], "source": "exception_rerun"}
-            elif case_id in primary_cases:
-                merged[case_id] = {**primary_cases[case_id], "source": "primary_until_rerun"}
+            rerun_entry = lookup_case_entry(case_id, rerun_cases)
+            if rerun_entry:
+                merged[case_id] = {**rerun_entry, "source": "exception_rerun"}
+            else:
+                primary_entry = lookup_case_entry(case_id, primary_cases)
+                if primary_entry:
+                    merged[case_id] = {**primary_entry, "source": "primary_until_rerun"}
+                else:
+                    merged[case_id] = {
+                        "status": "pending",
+                        "scored": None,
+                        "has_result": False,
+                        "source": "exception_rerun",
+                    }
+        else:
+            primary_entry = lookup_case_entry(case_id, primary_cases)
+            if primary_entry:
+                merged[case_id] = {**primary_entry, "source": "primary"}
             else:
                 merged[case_id] = {
                     "status": "pending",
                     "scored": None,
                     "has_result": False,
-                    "source": "exception_rerun",
+                    "source": "primary",
                 }
-        elif case_id in primary_cases:
-            merged[case_id] = {**primary_cases[case_id], "source": "primary"}
-        else:
-            merged[case_id] = {
-                "status": "pending",
-                "scored": None,
-                "has_result": False,
-                "source": "primary",
-            }
     return merged
 
 
@@ -742,26 +778,46 @@ def print_human_report(payload: dict[str, Any]) -> None:
         if payload.get("overall_exception_rerun"):
             _print_stats_block("Overall (exception rerun jobs only)", payload["overall_exception_rerun"])
 
+    active_exception_only = bool(payload.get("active_exception_only"))
     print("\nWorkers:")
     for row in payload.get("workers") or []:
         stats = row.get("stats") or {}
         scored = (stats.get("score_counts") or {}).get("scored", 0)
         not_scored = (stats.get("score_counts") or {}).get("not_scored", 0)
+        rerun_info = row.get("exception_rerun")
+        if active_exception_only and rerun_info:
+            batch_id = rerun_info["batch_id"]
+            print(
+                f"  - {row['worker_id']} rerun={batch_id} "
+                f"status={rerun_info['batch_status']} cases={rerun_info['rerun_case_count']}: "
+                f"completed={stats.get('completed', 0)} running={stats.get('running', 0)} "
+                f"pending={stats.get('pending', 0)} errored={stats.get('errored', 0)} "
+                f"scored={scored} not_scored={not_scored}"
+            )
+            harbor_stats = rerun_info.get("stats") or {}
+            print(
+                f"      harbor job trials: "
+                f"completed={harbor_stats.get('completed', 0)} "
+                f"running={harbor_stats.get('running', 0)} "
+                f"pending={harbor_stats.get('pending', 0)} "
+                f"started={harbor_stats.get('started_count', 0)}"
+            )
+            continue
+
         print(
             f"  - {row['worker_id']} primary={row['primary_batch_id']}: "
             f"completed={stats.get('completed', 0)} running={stats.get('running', 0)} "
             f"pending={stats.get('pending', 0)} errored={stats.get('errored', 0)} "
             f"scored={scored} not_scored={not_scored}"
         )
-        rerun_info = row.get("exception_rerun")
-        if rerun_info:
-            rerun_stats = rerun_info.get("stats") or {}
+        if rerun_info and not active_exception_only:
+            harbor_stats = rerun_info.get("stats") or {}
             print(
                 f"      rerun batch={rerun_info['batch_id']} status={rerun_info['batch_status']} "
                 f"cases={rerun_info['rerun_case_count']} "
-                f"completed={rerun_stats.get('completed', 0)} "
-                f"running={rerun_stats.get('running', 0)} "
-                f"exception={rerun_stats.get('exception_cases', 0)}"
+                f"harbor trials: completed={harbor_stats.get('completed', 0)} "
+                f"running={harbor_stats.get('running', 0)} "
+                f"pending={harbor_stats.get('pending', 0)}"
             )
 
 
