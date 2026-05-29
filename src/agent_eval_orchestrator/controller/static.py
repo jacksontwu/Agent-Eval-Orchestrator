@@ -297,6 +297,11 @@ INDEX_HTML = """<!doctype html>
       color: white;
       white-space: nowrap;
     }
+    .case-error-badge {
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .ok { background: var(--ok); }
     .warn { background: var(--warn); }
     .bad { background: var(--bad); }
@@ -739,15 +744,24 @@ INDEX_HTML = """<!doctype html>
       return status === "failed" && Boolean(item.error_text);
     }
 
+    function exceptionStatusBadge(item) {
+      const errorType = caseErrorType(item);
+      const cls = errorType === "(unknown)" ? "warn" : "err";
+      const title = ' title="' + esc(errorType) + '"';
+      return '<span class="badge ' + cls + ' case-error-badge"' + title + '>' + esc(errorType) + "</span>";
+    }
+
     function caseStatusBadge(item) {
       if (caseIsErrored(item)) {
-        return badge("exception", "err");
+        return exceptionStatusBadge(item);
       }
       return badge(item.status);
     }
 
     function caseErrorType(item) {
-      return item.errorType || (item.metrics && item.metrics.errorType) || "-";
+      const raw = item.errorType || (item.metrics && item.metrics.errorType);
+      if (raw == null || String(raw).trim() === "") return "(unknown)";
+      return String(raw).trim();
     }
 
     function syncStatusBadge(syncStatus) {
@@ -1511,15 +1525,53 @@ INDEX_HTML = """<!doctype html>
     }
 
     function openRerunConfigModal(detail) {
+      const byType = (detail.exceptionSummary && detail.exceptionSummary.byType) || [];
+      const defaultSelected = byType.map(entry => entry.errorType);
       state.rerunConfig = {
         runId: detail.run.run_id,
         detail,
         defaults: buildRerunFormDefaults(detail),
+        selectedErrorTypes: defaultSelected,
         error: "",
         submitting: false,
       };
       renderRerunConfigModal();
       document.getElementById("rerunConfigModal").classList.remove("hidden");
+    }
+
+    function rerunSelectedCaseCount(detail, selectedTypes) {
+      const byType = (detail.exceptionSummary && detail.exceptionSummary.byType) || [];
+      const selected = new Set(selectedTypes || []);
+      return byType.reduce((sum, entry) => (
+        selected.has(entry.errorType) ? sum + Number(entry.count || 0) : sum
+      ), 0);
+    }
+
+    function renderRerunTypeSelectionHtml(modalState) {
+      const detail = modalState.detail;
+      const byType = (detail.exceptionSummary && detail.exceptionSummary.byType) || [];
+      const selected = new Set(modalState.selectedErrorTypes || []);
+      const total = Number((detail.exceptionSummary && detail.exceptionSummary.total) || detail.exceptionCount || 0);
+      const selectedCount = rerunSelectedCaseCount(detail, modalState.selectedErrorTypes);
+      const rows = byType.map(entry => {
+        const checked = selected.has(entry.errorType) ? " checked" : "";
+        return '' +
+          '<label style="display:flex;gap:8px;align-items:center;margin-bottom:6px">' +
+            '<input type="checkbox" name="rerunErrorType" value="' + esc(entry.errorType) + '"' + checked + ' />' +
+            '<span><code>' + esc(entry.errorType) + '</code> (' + esc(entry.count) + ')</span>' +
+          '</label>';
+      }).join("") || '<div class="empty">暂无 exception 类型</div>';
+      return '' +
+        '<div style="margin-bottom:16px">' +
+          '<div class="item-title"><strong>Exception 类型（Task 级）</strong></div>' +
+          '<div class="subtle" style="margin-bottom:8px">默认全选；取消不需要的类型后确认重跑</div>' +
+          '<div class="actions" style="margin-bottom:8px">' +
+            '<button class="ghost" type="button" id="rerunSelectAllTypesBtn">全选</button>' +
+            '<button class="ghost" type="button" id="rerunClearAllTypesBtn">全不选</button>' +
+          '</div>' +
+          rows +
+          '<div class="subtle" style="margin-top:8px">已选 ' + esc(selectedCount) + ' / 共 ' + esc(total) + ' cases</div>' +
+        '</div>';
     }
 
     function renderRerunConfigModal() {
@@ -1532,9 +1584,12 @@ INDEX_HTML = """<!doctype html>
       const detail = modalState.detail;
       const defaults = modalState.defaults;
       const submitLabel = modalState.submitting ? "提交中…" : "确认重跑";
+      const selectedCount = rerunSelectedCaseCount(detail, modalState.selectedErrorTypes);
+      const total = Number((detail.exceptionSummary && detail.exceptionSummary.total) || detail.exceptionCount || 0);
       document.getElementById("rerunConfigModalSubtitle").textContent =
-        (detail.run?.display_name || "-") + " · exception: " + (detail.exceptionCount || 0);
-      body.innerHTML = '' +
+        (detail.run?.display_name || "-") + " · 已选 " + selectedCount + " / exception: " + total;
+      const submitDisabled = modalState.submitting || selectedCount <= 0;
+      body.innerHTML = renderRerunTypeSelectionHtml(modalState) +
         '<div class="detail-grid" style="margin-bottom:16px">' +
           '<div class="stat"><div class="subtle">Task</div><strong class="subtle">' + esc(detail.run?.display_name || "-") + '</strong></div>' +
           '<div class="stat"><div class="subtle">Exception cases</div><strong>' + esc(detail.exceptionCount || 0) + '</strong></div>' +
@@ -1560,10 +1615,32 @@ INDEX_HTML = """<!doctype html>
             '<div class="field"><label>Jobs Dir</label><input name="jobsDir" value="' + esc(defaults.jobsDir) + '" required /></div>' +
           '</div>' +
           '<div class="actions">' +
-            '<button class="primary" type="submit"' + (modalState.submitting ? ' disabled' : '') + '>' + submitLabel + '</button>' +
+            '<button class="primary" type="submit"' + (submitDisabled ? ' disabled' : '') + '>' + submitLabel + '</button>' +
             '<button class="ghost" type="button" id="cancelRerunConfigBtn"' + (modalState.submitting ? ' disabled' : '') + '>取消</button>' +
           '</div>' +
         '</form>';
+      body.querySelectorAll('input[name="rerunErrorType"]').forEach(input => {
+        input.addEventListener("change", () => {
+          modalState.selectedErrorTypes = Array.from(
+            body.querySelectorAll('input[name="rerunErrorType"]:checked')
+          ).map(el => el.value);
+          renderRerunConfigModal();
+        });
+      });
+      const selectAllBtn = document.getElementById("rerunSelectAllTypesBtn");
+      if (selectAllBtn) {
+        selectAllBtn.addEventListener("click", () => {
+          modalState.selectedErrorTypes = (detail.exceptionSummary?.byType || []).map(entry => entry.errorType);
+          renderRerunConfigModal();
+        });
+      }
+      const clearAllBtn = document.getElementById("rerunClearAllTypesBtn");
+      if (clearAllBtn) {
+        clearAllBtn.addEventListener("click", () => {
+          modalState.selectedErrorTypes = [];
+          renderRerunConfigModal();
+        });
+      }
       document.getElementById("cancelRerunConfigBtn").addEventListener("click", closeRerunConfigModal);
       document.getElementById("rerunConfigForm").addEventListener("submit", submitRerunConfigForm);
     }
@@ -1572,6 +1649,11 @@ INDEX_HTML = """<!doctype html>
       event.preventDefault();
       const modalState = state.rerunConfig;
       if (!modalState || modalState.submitting) return;
+      if (!modalState.selectedErrorTypes || !modalState.selectedErrorTypes.length) {
+        modalState.error = "请至少选择一种 exception 类型";
+        renderRerunConfigModal();
+        return;
+      }
       const payload = collectTaskConfigPayload(event.target);
       modalState.defaults = {
         ...modalState.defaults,
@@ -1594,7 +1676,10 @@ INDEX_HTML = """<!doctype html>
         await api("/api/runs/" + encodeURIComponent(modalState.runId) + "/rerun-exceptions", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify(payload),
+          body: JSON.stringify({
+            ...payload,
+            selectedErrorTypes: modalState.selectedErrorTypes || [],
+          }),
         });
         closeRerunConfigModal();
         if (state.rerunPollTimer) clearInterval(state.rerunPollTimer);

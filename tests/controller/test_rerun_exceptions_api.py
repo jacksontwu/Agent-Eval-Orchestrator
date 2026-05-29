@@ -349,3 +349,46 @@ def test_post_rerun_before_run_finished(store, tmp_path):
     resp = conn.getresponse()
     assert resp.status == 409
     server.shutdown()
+
+
+def test_post_rerun_exceptions_filters_by_selected_error_types(store, tmp_path):
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "a", "metrics": {"errorType": "TimeoutError"}},
+            {"case_id": "exc-b", "status": "errored", "error_text": "b", "metrics": {"errorType": "OtherError"}},
+        ],
+    )
+    server = start_test_server(store, tmp_path, 9896)
+    conn = HTTPConnection("127.0.0.1", 9896)
+    with patch.object(AssetSyncer, "start_rerun_sync_async"):
+        conn.request(
+            "POST",
+            f"/api/runs/{run['run_id']}/rerun-exceptions",
+            body=json.dumps({"selectedErrorTypes": ["TimeoutError"]}),
+            headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+        )
+        resp = conn.getresponse()
+    assert resp.status == 201
+    payload = json.loads(resp.read().decode("utf-8"))
+    assert payload["exceptionCount"] == 1
+    assert payload["selectedErrorTypes"] == ["TimeoutError"]
+    server.shutdown()
+
+
+def test_post_rerun_exceptions_rejects_empty_selected_error_types(store, tmp_path):
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    server = start_test_server(store, tmp_path, 9897)
+    conn = HTTPConnection("127.0.0.1", 9897)
+    conn.request(
+        "POST",
+        f"/api/runs/{run['run_id']}/rerun-exceptions",
+        body=json.dumps({"selectedErrorTypes": []}),
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    assert resp.status == 400
+    server.shutdown()

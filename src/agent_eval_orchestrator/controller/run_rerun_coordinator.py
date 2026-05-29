@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from agent_eval_orchestrator.storage.store import Store
 
 RERUN_CONFIG_KEYS = ("datasetPath", "bitfunCliPath", "bitfunConfigDir", "jobsDir", "executorConfig")
+RERUN_SCOPE_KEYS = ("selectedErrorTypes",)
 
 
 class RerunValidationError(Exception):
@@ -36,7 +37,15 @@ class RunRerunCoordinator:
         rerun_status = str(run.get("rerun_status") or "idle")
         if rerun_status in {"syncing", "running"}:
             raise RerunValidationError(409, "rerun already in progress")
-        grouped = self.store.group_exception_cases_by_worker(run_id)
+        selected_error_types = self._resolve_selected_error_types(run_id=run_id, config=config)
+        if not selected_error_types:
+            raise RerunValidationError(400, "no exception cases")
+
+        filtered_items = self.store.filter_exception_cases_by_types(run_id, selected_error_types)
+        if not filtered_items:
+            raise RerunValidationError(400, "no matching exception cases")
+
+        grouped = self.store.group_exception_items_by_worker(filtered_items)
         if not grouped:
             raise RerunValidationError(400, "no exception cases")
 
@@ -53,12 +62,13 @@ class RunRerunCoordinator:
             for case_ids in worker_shards.values()
             for case_id in case_ids
         ]
-        config_supplied = self._has_applicable_config(config)
+        asset_config = self._filter_config_for_assets(dict(config or {}))
+        config_supplied = self._has_applicable_config(asset_config)
         rerun_concurrency: int | None = None
         if config_supplied:
             rerun_concurrency = self._apply_config(
                 run=run,
-                config=dict(config or {}),
+                config=dict(asset_config or {}),
                 worker_shards=worker_shards,
                 all_case_ids=all_case_ids,
             )
@@ -89,6 +99,7 @@ class RunRerunCoordinator:
             case_ids=all_case_ids,
             worker_shards=worker_shards,
             rerun_batches=rerun_batches,
+            selected_error_types=selected_error_types,
         )
         self.store.update_run_rerun_fields(
             run_id=run_id,
@@ -102,8 +113,43 @@ class RunRerunCoordinator:
             "rerunJobId": job_id,
             "rerunStatus": "syncing",
             "exceptionCount": len(all_case_ids),
+            "selectedErrorTypes": selected_error_types,
             "workerShards": {worker_id: len(case_ids) for worker_id, case_ids in worker_shards.items()},
         }
+
+    def _resolve_selected_error_types(
+        self,
+        *,
+        run_id: str,
+        config: dict[str, Any] | None,
+    ) -> list[str]:
+        summary = self.store.summarize_exception_types_for_run(run_id)
+        available = [entry["errorType"] for entry in summary["byType"]]
+        if not available:
+            return []
+        raw = (config or {}).get("selectedErrorTypes")
+        if raw is None:
+            return available
+        if not isinstance(raw, list):
+            raise RerunValidationError(400, "selectedErrorTypes must be an array")
+        selected = [str(item).strip() for item in raw if str(item).strip()]
+        if not selected:
+            raise RerunValidationError(400, "at least one error type required")
+        available_set = set(available)
+        invalid = sorted({item for item in selected if item not in available_set})
+        if invalid:
+            raise RerunValidationError(400, f"invalid error type(s): {', '.join(invalid)}")
+        return selected
+
+    def _filter_config_for_assets(self, config: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not config:
+            return None
+        filtered = {
+            key: value
+            for key, value in config.items()
+            if key in RERUN_CONFIG_KEYS
+        }
+        return filtered or None
 
     def _resolve_dataset_path(
         self,

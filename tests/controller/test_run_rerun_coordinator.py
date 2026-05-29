@@ -77,6 +77,62 @@ def test_start_rerun_rejects_no_exceptions(coordinator, store):
     assert exc.value.code == 400
 
 
+def test_start_rerun_filters_by_selected_error_types(coordinator, store):
+    run, parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "a", "metrics": {"errorType": "TimeoutError"}},
+            {"case_id": "exc-b", "status": "errored", "error_text": "b", "metrics": {"errorType": "OtherError"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    result = coordinator.start_rerun(
+        run["run_id"],
+        config={"selectedErrorTypes": ["TimeoutError"]},
+    )
+    assert result["exceptionCount"] == 1
+    assert result["selectedErrorTypes"] == ["TimeoutError"]
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    assert job["selected_error_types"] == ["TimeoutError"]
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["selected_case_ids"] == ["exc-a"]
+
+
+def test_start_rerun_rejects_empty_selected_error_types(coordinator, store):
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    with pytest.raises(RerunValidationError) as exc:
+        coordinator.start_rerun(run["run_id"], config={"selectedErrorTypes": []})
+    assert exc.value.code == 400
+    assert "at least one" in exc.value.message.lower()
+
+
+def test_start_rerun_rejects_unknown_error_type(coordinator, store):
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "TimeoutError"}}],
+    )
+    with pytest.raises(RerunValidationError) as exc:
+        coordinator.start_rerun(run["run_id"], config={"selectedErrorTypes": ["DoesNotExist"]})
+    assert exc.value.code == 400
+    assert "invalid error type" in exc.value.message.lower()
+
+
+def test_start_rerun_omitted_types_reruns_all(coordinator, store):
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "a", "metrics": {"errorType": "TimeoutError"}},
+            {"case_id": "exc-b", "status": "errored", "error_text": "b", "metrics": {"errorType": "OtherError"}},
+        ],
+    )
+    result = coordinator.start_rerun(run["run_id"], config={})
+    assert result["exceptionCount"] == 2
+    assert set(result["selectedErrorTypes"]) == {"TimeoutError", "OtherError"}
+
+
 def _prepare_rerun_assets(tmp_path, case_ids):
     dataset = tmp_path / "dataset"
     dataset.mkdir(parents=True, exist_ok=True)

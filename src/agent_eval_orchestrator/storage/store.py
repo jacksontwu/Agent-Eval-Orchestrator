@@ -34,6 +34,14 @@ class Store:
         return str(case.get("status") or "") == "failed" and not case.get("error_text")
 
     @staticmethod
+    def case_error_type(case: dict[str, Any]) -> str:
+        metrics = case.get("metrics") or {}
+        raw = case.get("errorType") or metrics.get("errorType")
+        if raw is None or str(raw).strip() == "":
+            return "(unknown)"
+        return str(raw).strip()
+
+    @staticmethod
     def _trial_merge_key(case: dict[str, Any]) -> str:
         artifact = case.get("artifact_index") or case.get("artifactIndex") or {}
         trial_dir = str(artifact.get("trialDir") or "").strip()
@@ -277,6 +285,13 @@ class Store:
                 );
                 """
             )
+            rerun_job_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(run_rerun_jobs)").fetchall()
+            }
+            if "selected_error_types_json" not in rerun_job_columns:
+                conn.execute(
+                    "ALTER TABLE run_rerun_jobs ADD COLUMN selected_error_types_json TEXT"
+                )
             self._drop_case_details_column_if_present(conn)
 
     def _make_tunnel_remote_port_nullable(self, conn: sqlite3.Connection) -> None:
@@ -501,14 +516,48 @@ class Store:
                 )
         return exceptions
 
-    def group_exception_cases_by_worker(self, run_id: str) -> dict[str, list[dict[str, Any]]]:
-        grouped: dict[str, list[dict[str, Any]]] = {}
+    def summarize_exception_types_for_run(self, run_id: str) -> dict[str, Any]:
+        counts: dict[str, int] = {}
         for item in self.list_exception_cases_for_run(run_id):
-            worker_id = str(item["worker_id"] or "").strip()
+            error_type = self.case_error_type(dict(item.get("case") or {}))
+            counts[error_type] = counts.get(error_type, 0) + 1
+        by_type = [
+            {"errorType": error_type, "count": count}
+            for error_type, count in counts.items()
+        ]
+        by_type.sort(key=lambda entry: (-entry["count"], entry["errorType"]))
+        total = sum(entry["count"] for entry in by_type)
+        return {"total": total, "byType": by_type}
+
+    def filter_exception_cases_by_types(
+        self,
+        run_id: str,
+        selected_error_types: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        items = self.list_exception_cases_for_run(run_id)
+        if selected_error_types is None:
+            return items
+        selected = set(selected_error_types)
+        return [
+            item
+            for item in items
+            if self.case_error_type(dict(item.get("case") or {})) in selected
+        ]
+
+    def group_exception_items_by_worker(
+        self,
+        items: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in items:
+            worker_id = str(item.get("worker_id") or "").strip()
             if not worker_id:
                 continue
             grouped.setdefault(worker_id, []).append(item)
         return grouped
+
+    def group_exception_cases_by_worker(self, run_id: str) -> dict[str, list[dict[str, Any]]]:
+        return self.group_exception_items_by_worker(self.list_exception_cases_for_run(run_id))
 
     @staticmethod
     def _recompute_batch_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1343,6 +1392,7 @@ class Store:
         case_ids: list[str],
         worker_shards: dict[str, list[str]],
         rerun_batches: dict[str, str],
+        selected_error_types: list[str] | None = None,
     ) -> dict[str, Any]:
         now = now_iso()
         with self.connect() as conn:
@@ -1351,8 +1401,9 @@ class Store:
                 INSERT INTO run_rerun_jobs(
                     job_id, run_id, status, sync_job_id,
                     case_ids_json, worker_shards_json, rerun_batches_json,
+                    selected_error_types_json,
                     error_text, created_at, finished_at
-                ) VALUES(?, ?, 'pending', NULL, ?, ?, ?, NULL, ?, NULL)
+                ) VALUES(?, ?, 'pending', NULL, ?, ?, ?, ?, NULL, ?, NULL)
                 """,
                 (
                     job_id,
@@ -1360,6 +1411,7 @@ class Store:
                     json.dumps(case_ids, ensure_ascii=False),
                     json.dumps(worker_shards, ensure_ascii=False),
                     json.dumps(rerun_batches, ensure_ascii=False),
+                    json.dumps(selected_error_types or [], ensure_ascii=False),
                     now,
                 ),
             )
@@ -1429,6 +1481,8 @@ class Store:
         item["case_ids"] = json.loads(item.pop("case_ids_json"))
         item["worker_shards"] = json.loads(item.pop("worker_shards_json"))
         item["rerun_batches"] = json.loads(item.pop("rerun_batches_json"))
+        selected_raw = item.pop("selected_error_types_json", None)
+        item["selected_error_types"] = json.loads(selected_raw) if selected_raw else []
         return item
 
     def create_asset_sync_job(
@@ -1987,6 +2041,7 @@ class Store:
             key=lambda item: (item["workerName"], item["workerId"]),
         )
         exception_count = len(self.list_exception_cases_for_run(run_id))
+        exception_summary = self.summarize_exception_types_for_run(run_id)
         rerun_status = str(run.get("rerun_status") or "idle")
         can_rerun = (
             self.is_run_primary_terminal(run_id)
@@ -2000,6 +2055,7 @@ class Store:
             "workerGroups": worker_group_list,
             "canRerunExceptions": can_rerun,
             "exceptionCount": exception_count,
+            "exceptionSummary": exception_summary,
             "rerunStatus": rerun_status,
             "rerunJobId": run.get("rerun_job_id"),
         }

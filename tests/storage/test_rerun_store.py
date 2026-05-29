@@ -186,3 +186,28 @@ def test_eval_task_detail_includes_rerun_fields(store):
     assert detail["canRerunExceptions"] is True
     assert detail["run"]["rerun_status"] == "idle"
     assert detail["batches"][0]["batch_kind"] == "primary"
+
+
+def test_create_run_rerun_job_persists_selected_error_types(store):
+    template = store.create_task_template(
+        owner="default",
+        name="rerun-test",
+        dataset_ref="/tmp/dataset",
+        executor_kind="harbor-docker",
+        executor_config={},
+        model_profile_ref=None,
+        note="",
+    )
+    run = store.create_run(template_id=template["template_id"], display_name="rerun-run")
+    job_id = new_id("rerun")
+    job = store.create_run_rerun_job(
+        job_id=job_id,
+        run_id=run["run_id"],
+        case_ids=["case-a"],
+        worker_shards={"worker-a": ["case-a"]},
+        rerun_batches={"worker-a": "batch-rerun-a"},
+        selected_error_types=["TimeoutError", "OtherError"],
+    )
+    assert job["selected_error_types"] == ["TimeoutError", "OtherError"]
+    fetched = store.get_run_rerun_job(job_id)
+    assert fetched["selected_error_types"] == ["TimeoutError", "OtherError"]
