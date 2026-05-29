@@ -33,6 +33,7 @@ from agent_eval_orchestrator.controller.asset_syncer import (
 )
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
+from agent_eval_orchestrator.normalizers.harbor import normalize_harbor_job
 from agent_eval_orchestrator.normalizers.harbor_job_merge import copy_trial_dirs, write_merged_job
 from agent_eval_orchestrator.normalizers.harbor_timestamps import normalize_jobs_dir
 from agent_eval_orchestrator.controller.provisioner import Provisioner
@@ -105,6 +106,64 @@ def _rebuild_merged_job_for_run(
                 shutil.rmtree(legacy_batch_dir)
 
 
+def _apply_exception_rerun_merge(
+    *,
+    store: Store,
+    batch_id: str,
+    rerun_cases: list[dict[str, object]] | None = None,
+    jobs_dir: Path | None = None,
+) -> bool:
+    batch_row = store.get_batch(batch_id)
+    if not batch_row or str(batch_row.get("batch_kind") or "") != "exception_rerun":
+        return False
+    parent_batch_id = str(batch_row.get("parent_batch_id") or "").strip()
+    if not parent_batch_id:
+        return False
+    imported_root = store.layout.controller_dir / DEFAULT_IMPORTED_JOBS_DIRNAME
+    cases = rerun_cases
+    if cases is None:
+        imported_job_dir = imported_root / batch_id
+        if not imported_job_dir.exists():
+            return False
+        _, cases, _ = normalize_harbor_job(imported_job_dir, batch_id)
+    if not cases:
+        return False
+    store.merge_rerun_cases_into_parent(
+        parent_batch_id=parent_batch_id,
+        rerun_cases=cases,
+        rerun_batch_id=batch_id,
+    )
+    parent_imported = imported_root / parent_batch_id
+    rerun_imported = imported_root / batch_id
+    if rerun_imported.exists():
+        copy_trial_dirs(rerun_imported, parent_imported)
+    parent_batch = store.get_batch(parent_batch_id)
+    if parent_batch:
+        parent_job_dir = Path(str(parent_batch["batch_root"])) / "harbor" / "jobs" / parent_batch_id
+        rerun_job_dir = Path(str(batch_row["batch_root"])) / "harbor" / "jobs" / batch_id
+        if rerun_job_dir.exists():
+            parent_job_dir.mkdir(parents=True, exist_ok=True)
+            copy_trial_dirs(rerun_job_dir, parent_job_dir)
+    store.finish_rerun_batch_if_complete(rerun_batch_id=batch_id)
+    run_row = store.get_run(str(batch_row["run_id"]))
+    if run_row and str(run_row.get("rerun_status") or "") in {"succeeded", "failed"}:
+        metadata = batch_row.get("executor_metadata") or {}
+        resolved_jobs_dir = Path(
+            str(metadata.get("combinedJobsDir") or DEFAULT_JOBS_DIR)
+        ).expanduser().resolve()
+        if jobs_dir is not None:
+            resolved_jobs_dir = jobs_dir
+        try:
+            _rebuild_merged_job_for_run(
+                store=store,
+                run_id=str(batch_row["run_id"]),
+                jobs_dir=resolved_jobs_dir,
+            )
+        except RuntimeError:
+            pass
+    return True
+
+
 def _job_sources_for_run(
     *,
     store: Store,
@@ -118,7 +177,7 @@ def _job_sources_for_run(
         return []
     merged_job_name = sanitize_name(str(run["display_name"]))
     sources: list[Path] = []
-    for batch in store.list_batches_for_run(run_id):
+    for batch in store.list_primary_batches_for_run(run_id):
         artifact_index = batch.get("artifact_index") or {}
         candidates: list[Path] = []
         raw_job_dir = str(artifact_index.get("jobDir") or "").strip()
@@ -787,6 +846,12 @@ class Handler(BaseHTTPRequestHandler):
                 _safe_extract_tar(archive, imported_root)
                 batch = self.store.get_batch(batch_id)
                 if batch:
+                    if str(batch.get("batch_kind") or "") == "exception_rerun":
+                        _apply_exception_rerun_merge(
+                            store=self.store,
+                            batch_id=batch_id,
+                            jobs_dir=jobs_dir,
+                        )
                     try:
                         _rebuild_merged_job_for_run(
                             store=self.store,
@@ -1187,39 +1252,16 @@ class Handler(BaseHTTPRequestHandler):
                 and bool(body.get("finished"))
                 and isinstance(body.get("cases"), list)
             ):
-                parent_batch_id = str(batch_row.get("parent_batch_id") or "")
-                if parent_batch_id:
-                    self.store.merge_rerun_cases_into_parent(
-                        parent_batch_id=parent_batch_id,
-                        rerun_cases=body["cases"],
-                        rerun_batch_id=str(body["batchId"]),
-                    )
-                    parent_batch = self.store.get_batch(parent_batch_id)
-                    if parent_batch:
-                        parent_job_dir = Path(str(parent_batch["batch_root"])) / "harbor" / "jobs" / parent_batch_id
-                        rerun_job_dir = Path(str(batch_row["batch_root"])) / "harbor" / "jobs" / str(body["batchId"])
-                        if rerun_job_dir.exists():
-                            parent_job_dir.mkdir(parents=True, exist_ok=True)
-                            copy_trial_dirs(rerun_job_dir, parent_job_dir)
-                    self.store.finish_rerun_batch_if_complete(rerun_batch_id=str(body["batchId"]))
-                    run_row = self.store.get_run(str(batch_row["run_id"]))
-                    if run_row and str(run_row.get("rerun_status") or "") in {"succeeded", "failed"}:
-                        metadata = (
-                            body.get("executorMetadata")
-                            if isinstance(body.get("executorMetadata"), dict)
-                            else {}
-                        )
-                        jobs_dir = Path(
-                            str(metadata.get("combinedJobsDir") or DEFAULT_JOBS_DIR)
-                        ).expanduser().resolve()
-                        try:
-                            _rebuild_merged_job_for_run(
-                                store=self.store,
-                                run_id=str(batch_row["run_id"]),
-                                jobs_dir=jobs_dir,
-                            )
-                        except RuntimeError:
-                            pass
+                metadata = (
+                    body.get("executorMetadata") if isinstance(body.get("executorMetadata"), dict) else {}
+                )
+                jobs_dir = Path(str(metadata.get("combinedJobsDir") or DEFAULT_JOBS_DIR)).expanduser().resolve()
+                _apply_exception_rerun_merge(
+                    store=self.store,
+                    batch_id=str(body["batchId"]),
+                    rerun_cases=body["cases"],
+                    jobs_dir=jobs_dir,
+                )
             if self.asset_syncer is not None:
                 batch_row = self.store.get_batch(str(body["batchId"]))
                 if batch_row and self.store.is_run_terminal(str(batch_row["run_id"])):

@@ -127,6 +127,55 @@ def test_merge_rerun_cases_into_parent_overwrites_exceptions_only(store):
     assert rerun_cases == []
 
 
+def test_merge_rerun_cases_preserves_non_rerun_trials_with_shared_case_id(store):
+    run, parent = _seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": "shared-case",
+                "status": "succeeded",
+                "score": 1.0,
+                "metrics": {"trialName": "shared-case__run-a"},
+                "artifact_index": {"trialDir": "/tmp/shared-case__run-a"},
+            },
+            {
+                "case_id": "shared-case",
+                "status": "errored",
+                "error_text": "boom",
+                "metrics": {"trialName": "shared-case__run-b"},
+                "artifact_index": {"trialDir": "/tmp/shared-case__run-b"},
+            },
+        ],
+    )
+    rerun = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["shared-case"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        batch_kind="exception_rerun",
+        parent_batch_id=parent["batch_id"],
+    )
+    store.merge_rerun_cases_into_parent(
+        parent_batch_id=parent["batch_id"],
+        rerun_cases=[
+            {
+                "caseId": "shared-case",
+                "trialName": "shared-case__run-b",
+                "status": "succeeded",
+                "score": 1.0,
+                "metrics": {},
+                "artifactIndex": {"trialDir": "/tmp/shared-case__run-b"},
+            }
+        ],
+        rerun_batch_id=rerun["batch_id"],
+    )
+    parent_cases = store.list_case_runs(parent["batch_id"])
+    by_trial = {store._trial_merge_key(case): case for case in parent_cases}
+    assert by_trial["shared-case__run-a"]["status"] == "succeeded"
+    assert by_trial["shared-case__run-b"]["status"] == "succeeded"
+    assert len(parent_cases) == 2
+
+
 def test_eval_task_detail_includes_rerun_fields(store):
     run, _ = seed_finished_run_with_cases(
         store,

@@ -33,6 +33,17 @@ class Store:
     def _case_is_failed(case: dict[str, Any]) -> bool:
         return str(case.get("status") or "") == "failed" and not case.get("error_text")
 
+    @staticmethod
+    def _trial_merge_key(case: dict[str, Any]) -> str:
+        artifact = case.get("artifact_index") or case.get("artifactIndex") or {}
+        trial_dir = str(artifact.get("trialDir") or "").strip()
+        if trial_dir:
+            return Path(trial_dir).name
+        trial_name = str(case.get("trialName") or case.get("trial_name") or "").strip()
+        if trial_name:
+            return trial_name
+        return str(case.get("case_id") or case.get("caseId") or "").strip()
+
     @contextmanager
     def connect(self) -> Any:
         conn = sqlite3.connect(self.layout.db_path)
@@ -528,12 +539,16 @@ class Store:
             if not parent:
                 conn.execute("ROLLBACK")
                 return None
-            rerun_case_ids = {str(case["caseId"]) for case in rerun_cases}
+            rerun_trial_keys = {self._trial_merge_key(case) for case in rerun_cases if self._trial_merge_key(case)}
             existing_rows = conn.execute(
                 "SELECT * FROM case_runs WHERE batch_id = ?",
                 (parent_batch_id,),
             ).fetchall()
-            kept = [self._case_item(row) for row in existing_rows if str(row["case_id"]) not in rerun_case_ids]
+            kept = [
+                self._case_item(row)
+                for row in existing_rows
+                if self._trial_merge_key(self._case_item(row)) not in rerun_trial_keys
+            ]
             conn.execute("DELETE FROM case_runs WHERE batch_id = ?", (parent_batch_id,))
             for case in kept:
                 conn.execute(

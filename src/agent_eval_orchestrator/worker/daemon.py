@@ -20,6 +20,9 @@ from agent_eval_orchestrator.core.defaults import (
     DEFAULT_POLL_INTERVAL_SEC,
     DEFAULT_SHARED_ROOT,
     DEFAULT_SLOTS,
+    DEFAULT_WORKER_FINAL_HEARTBEAT_TIMEOUT_SEC,
+    DEFAULT_WORKER_JOB_ARCHIVE_TIMEOUT_SEC,
+    DEFAULT_WORKER_POST_TIMEOUT_SEC,
 )
 from agent_eval_orchestrator.executors.harbor import HarborExecutor
 from agent_eval_orchestrator.normalizers.harbor import normalize_harbor_job, write_normalized_snapshot
@@ -30,7 +33,13 @@ def log(message: str) -> None:
     print(f"[worker] {message}", flush=True)
 
 
-def post_json(url: str, payload: dict, auth_token: str | None = None) -> dict:
+def post_json(
+    url: str,
+    payload: dict,
+    auth_token: str | None = None,
+    *,
+    timeout_sec: int | None = None,
+) -> dict:
     req = request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -39,7 +48,8 @@ def post_json(url: str, payload: dict, auth_token: str | None = None) -> dict:
     )
     if auth_token:
         req.add_header("X-AEO-Token", auth_token)
-    with request.urlopen(req, timeout=30) as resp:
+    timeout = timeout_sec if timeout_sec is not None else DEFAULT_WORKER_POST_TIMEOUT_SEC
+    with request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -187,16 +197,28 @@ def main(argv: list[str] | None = None) -> int:
                     summary, cases, artifact_index = normalize_harbor_job(collected.job_dir, batch_id)
                     write_normalized_snapshot(active_batch.prepared.batch_root, summary, cases)
                     if active_batch.prepared.metadata.get("collectJobs"):
-                        post_json(
-                            f"{args.controller_url}/api/workers/job-archive",
-                            {
-                                "workerId": args.worker_id,
-                                "batchId": batch_id,
-                                "jobsDir": active_batch.prepared.metadata.get("combinedJobsDir"),
-                                "archiveBase64": base64.b64encode(_tar_directory(collected.job_dir)).decode("ascii"),
-                            },
-                            auth_token=str(args.auth_token or "") or None,
-                        )
+                        try:
+                            post_json(
+                                f"{args.controller_url}/api/workers/job-archive",
+                                {
+                                    "workerId": args.worker_id,
+                                    "batchId": batch_id,
+                                    "jobsDir": active_batch.prepared.metadata.get("combinedJobsDir"),
+                                    "archiveBase64": base64.b64encode(
+                                        _tar_directory(collected.job_dir)
+                                    ).decode("ascii"),
+                                },
+                                auth_token=str(args.auth_token or "") or None,
+                                timeout_sec=DEFAULT_WORKER_JOB_ARCHIVE_TIMEOUT_SEC,
+                            )
+                        except Exception as exc:
+                            archive_error = f"job archive upload failed: {exc}"
+                            if status == "failed":
+                                error_text = (
+                                    f"{error_text}; {archive_error}" if error_text else archive_error
+                                )
+                            else:
+                                error_text = archive_error
             except Exception as exc:
                 status = "failed"
                 error_text = f"{error_text}; collect failed: {exc}" if error_text else f"collect failed: {exc}"
@@ -216,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
                         "artifactIndex": artifact_index,
                     },
                     auth_token=str(args.auth_token or "") or None,
+                    timeout_sec=DEFAULT_WORKER_FINAL_HEARTBEAT_TIMEOUT_SEC,
                 )
             except Exception as exc:
                 log(f"final heartbeat failed for {batch_id}: {exc}")
