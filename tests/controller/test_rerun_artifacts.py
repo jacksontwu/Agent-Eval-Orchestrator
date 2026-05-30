@@ -59,6 +59,30 @@ def test_copy_jobs_tree_rejects_same_source_and_target(tmp_path):
     assert (source / "merged" / "case-a__old" / "result.json").exists()
 
 
+def test_copy_jobs_tree_rejects_missing_source(tmp_path):
+    source = tmp_path / "missing-source"
+    target = tmp_path / "target-jobs"
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, target)
+
+    assert "source jobs directory not found" in str(exc.value)
+    assert not target.exists()
+
+
+def test_copy_jobs_tree_rejects_non_directory_source(tmp_path):
+    source = tmp_path / "source-jobs"
+    target = tmp_path / "target-jobs"
+    source.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, target)
+
+    assert "source jobs directory not found" in str(exc.value)
+    assert source.read_text(encoding="utf-8") == "not a directory"
+    assert not target.exists()
+
+
 def test_copy_jobs_tree_rejects_target_inside_source(tmp_path):
     source = tmp_path / "jobs"
     target = source / "nested-target"
@@ -112,6 +136,15 @@ def test_copy_jobs_tree_rejects_symlink_target(tmp_path):
 
     assert "target jobs path exists but is not a directory" in str(exc.value)
     assert target.is_symlink()
+
+
+def test_delete_trials_for_cases_missing_jobs_dir_returns_empty(tmp_path):
+    removed = delete_trials_for_cases(
+        jobs_dir=tmp_path / "missing",
+        case_ids=["case-a"],
+    )
+
+    assert removed == []
 
 
 def test_delete_trials_for_cases_removes_only_selected_trials(tmp_path):
