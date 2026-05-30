@@ -84,60 +84,70 @@ class RunRerunCoordinator:
             display_name=f"{run['display_name']} rerun",
             parent_run_id=run_id,
         )
-        rerun_concurrency: int | None = None
-        if config_supplied:
-            rerun_concurrency = self._apply_config(
-                run=derived_run,
-                config=dict(asset_config or {}),
-                fallback_manifest=existing_manifest,
-                worker_shards=worker_shards,
-                all_case_ids=all_case_ids,
-            )
-
-        cloned_batch_ids = self.store.clone_primary_batches_to_run(
-            source_run_id=run_id,
-            target_run_id=str(derived_run["run_id"]),
-        )
         job_id = new_id("rerun")
-        rerun_batches: dict[str, str | list[str]] = {}
-        for worker_id, items in grouped.items():
-            batches_for_worker: list[str] = []
-            by_parent: dict[str, list[str]] = {}
-            for item, case_id in zip(items, worker_shards[worker_id]):
-                by_parent.setdefault(str(item["parent_batch_id"]), []).append(case_id)
-            for original_parent_batch_id, case_ids in by_parent.items():
-                parent_batch_id = cloned_batch_ids[original_parent_batch_id]
-                parent = self.store.get_batch(parent_batch_id)
-                batch_options = dict((parent or {}).get("batch_options") or {})
-                if rerun_concurrency is not None:
-                    batch_options["concurrency"] = rerun_concurrency
-                batch = self.store.create_batch(
-                    run_id=str(derived_run["run_id"]),
-                    selected_case_ids=case_ids,
-                    preferred_worker_id=worker_id,
-                    batch_options=batch_options,
-                    initial_status="pending_sync",
-                    batch_kind="exception_rerun",
-                    parent_batch_id=parent_batch_id,
+        try:
+            rerun_concurrency: int | None = None
+            if config_supplied:
+                rerun_concurrency = self._apply_config(
+                    run=derived_run,
+                    config=dict(asset_config or {}),
+                    fallback_manifest=existing_manifest,
+                    worker_shards=worker_shards,
+                    all_case_ids=all_case_ids,
                 )
-                batches_for_worker.append(str(batch["batch_id"]))
-            rerun_batches[worker_id] = batches_for_worker[0] if len(batches_for_worker) == 1 else batches_for_worker
 
-        self.store.create_run_rerun_job(
-            job_id=job_id,
-            run_id=str(derived_run["run_id"]),
-            case_ids=all_case_ids,
-            worker_shards=worker_shards,
-            rerun_batches=rerun_batches,
-            selected_error_types=selected_error_types,
-        )
-        self.store.update_run_rerun_fields(
-            run_id=str(derived_run["run_id"]),
-            rerun_status="syncing",
-            rerun_job_id=job_id,
-        )
-        if self.asset_syncer is not None:
-            self.asset_syncer.start_rerun_sync_async(job_id=job_id, run_id=str(derived_run["run_id"]))
+            cloned_batch_ids = self.store.clone_primary_batches_to_run(
+                source_run_id=run_id,
+                target_run_id=str(derived_run["run_id"]),
+            )
+            rerun_batches: dict[str, str | list[str]] = {}
+            for worker_id, items in grouped.items():
+                batches_for_worker: list[str] = []
+                by_parent: dict[str, list[str]] = {}
+                for item, case_id in zip(items, worker_shards[worker_id]):
+                    by_parent.setdefault(str(item["parent_batch_id"]), []).append(case_id)
+                for original_parent_batch_id, case_ids in by_parent.items():
+                    parent_batch_id = cloned_batch_ids[original_parent_batch_id]
+                    parent = self.store.get_batch(parent_batch_id)
+                    batch_options = dict((parent or {}).get("batch_options") or {})
+                    if rerun_concurrency is not None:
+                        batch_options["concurrency"] = rerun_concurrency
+                    batch = self.store.create_batch(
+                        run_id=str(derived_run["run_id"]),
+                        selected_case_ids=case_ids,
+                        preferred_worker_id=worker_id,
+                        batch_options=batch_options,
+                        initial_status="pending_sync",
+                        batch_kind="exception_rerun",
+                        parent_batch_id=parent_batch_id,
+                    )
+                    batches_for_worker.append(str(batch["batch_id"]))
+                rerun_batches[worker_id] = (
+                    batches_for_worker[0] if len(batches_for_worker) == 1 else batches_for_worker
+                )
+
+            self.store.create_run_rerun_job(
+                job_id=job_id,
+                run_id=str(derived_run["run_id"]),
+                case_ids=all_case_ids,
+                worker_shards=worker_shards,
+                rerun_batches=rerun_batches,
+                selected_error_types=selected_error_types,
+            )
+            self.store.update_run_rerun_fields(
+                run_id=str(derived_run["run_id"]),
+                rerun_status="syncing",
+                rerun_job_id=job_id,
+            )
+            if self.asset_syncer is not None:
+                self.asset_syncer.start_rerun_sync_async(job_id=job_id, run_id=str(derived_run["run_id"]))
+        except Exception as exc:
+            self._mark_derived_rerun_failed(
+                run_id=str(derived_run["run_id"]),
+                job_id=job_id,
+                error_text=str(exc),
+            )
+            raise
 
         return {
             "runId": str(derived_run["run_id"]),
@@ -148,6 +158,21 @@ class RunRerunCoordinator:
             "selectedErrorTypes": selected_error_types,
             "workerShards": {worker_id: len(case_ids) for worker_id, case_ids in worker_shards.items()},
         }
+
+    def _mark_derived_rerun_failed(self, *, run_id: str, job_id: str, error_text: str) -> None:
+        job = self.store.get_run_rerun_job(job_id)
+        self.store.update_run_rerun_fields(
+            run_id=run_id,
+            rerun_status="failed",
+            rerun_job_id=job_id if job else None,
+        )
+        if job:
+            self.store.update_run_rerun_job(
+                job_id,
+                status="failed",
+                error_text=error_text,
+                finished=True,
+            )
 
     def _resolve_selected_error_types(
         self,

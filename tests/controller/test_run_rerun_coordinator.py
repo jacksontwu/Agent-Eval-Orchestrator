@@ -140,6 +140,33 @@ def test_start_rerun_creates_derived_run_and_leaves_original_unchanged(store, tm
     assert rerun_batch["parent_batch_id"] != parent["batch_id"]
 
 
+def test_start_rerun_marks_derived_run_failed_when_asset_sync_start_raises(store):
+    class RaisingAssetSyncer:
+        def start_rerun_sync_async(self, *, job_id, run_id):
+            raise RuntimeError(f"sync start failed for {job_id}:{run_id}")
+
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=RaisingAssetSyncer())
+
+    with pytest.raises(RuntimeError, match="sync start failed"):
+        coordinator.start_rerun(run["run_id"])
+
+    assert store.list_active_derived_reruns(run["run_id"]) == []
+    derived_runs = _derived_runs_for_parent(store, run["run_id"])
+    assert len(derived_runs) == 1
+    failed_run = store.get_run(derived_runs[0]["run_id"])
+    assert failed_run["rerun_status"] == "failed"
+    job = store.get_run_rerun_job(failed_run["rerun_job_id"])
+    assert job["status"] == "failed"
+    assert "sync start failed" in job["error_text"]
+
+    retry = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(run["run_id"])
+    assert retry["rerunStatus"] == "syncing"
+
+
 def test_start_rerun_splits_same_worker_reruns_by_parent_batch(coordinator, store):
     run, first_parent = seed_finished_run_with_cases(
         store,

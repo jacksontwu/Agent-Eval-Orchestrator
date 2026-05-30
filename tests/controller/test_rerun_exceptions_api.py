@@ -315,7 +315,23 @@ def test_get_rerun_status_includes_list_valued_rerun_batches(store, tmp_path):
     ]
     assert {item["workerId"] for item in payload["rerunBatches"]} == {"worker-a"}
     assert "rerun_batches" not in payload["job"]
-    assert payload["job"]["rerunBatches"] == payload["rerunBatches"]
+    assert set(payload["job"]) == {
+        "jobId",
+        "runId",
+        "status",
+        "syncJobId",
+        "caseIds",
+        "workerShards",
+        "selectedErrorTypes",
+        "errorText",
+        "createdAt",
+        "finishedAt",
+    }
+    assert payload["job"]["jobId"] == "rerun-list"
+    assert payload["job"]["runId"] == run["run_id"]
+    assert payload["job"]["caseIds"] == ["exc-a", "exc-b"]
+    assert payload["job"]["workerShards"] == {"worker-a": ["exc-a", "exc-b"]}
+    assert payload["job"]["selectedErrorTypes"] == []
     server.shutdown()
 
 

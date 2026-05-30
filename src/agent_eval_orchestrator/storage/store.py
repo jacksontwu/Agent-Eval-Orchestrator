@@ -2125,6 +2125,9 @@ class Store:
                 overall_status = "finished"
             elif primary_batches:
                 overall_status = "mixed"
+            rerun_status = str(run.get("rerun_status") or "idle")
+            if run.get("parent_run_id") and rerun_status in {"syncing", "running"}:
+                overall_status = rerun_status
 
             summaries.append(
                 {

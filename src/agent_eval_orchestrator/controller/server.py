@@ -75,6 +75,21 @@ def _safe_extract_tar(archive: bytes, target_dir: Path) -> None:
         tar.extractall(target_dir)
 
 
+def _run_rerun_job_dto(job: dict[str, object]) -> dict[str, object]:
+    return {
+        "jobId": job["job_id"],
+        "runId": job["run_id"],
+        "status": job["status"],
+        "syncJobId": job.get("sync_job_id"),
+        "caseIds": job.get("case_ids") or [],
+        "workerShards": job.get("worker_shards") or {},
+        "selectedErrorTypes": job.get("selected_error_types") or [],
+        "errorText": job.get("error_text"),
+        "createdAt": job.get("created_at"),
+        "finishedAt": job.get("finished_at"),
+    }
+
+
 def _rebuild_merged_job_for_run(
     *,
     store: Store,
@@ -660,11 +675,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "parentBatchId": batch.get("parent_batch_id"),
                             }
                         )
-                job = dict(job)
-                job.pop("rerun_batches", None)
-                job["rerunBatches"] = rerun_batches
+                job = _run_rerun_job_dto(job)
             remaining = len(self.store.list_exception_cases_for_run(run_id))
-            error_text = str((job or {}).get("error_text") or "") or None
+            error_text = str((job or {}).get("errorText") or "") or None
             _json_response(
                 self,
                 {

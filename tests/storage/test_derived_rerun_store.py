@@ -108,6 +108,24 @@ def test_list_active_derived_reruns_for_parent(store):
     ]
 
 
+def test_eval_task_summary_uses_active_derived_rerun_status(store):
+    parent, _ = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc", "status": "errored", "error_text": "boom"}],
+    )
+    child = _create_child_run(store, parent)
+    store.clone_primary_batches_to_run(
+        source_run_id=parent["run_id"],
+        target_run_id=child["run_id"],
+    )
+    store.update_run_rerun_fields(run_id=child["run_id"], rerun_status="syncing")
+
+    summaries = store.list_eval_task_summaries()
+    match = next(item for item in summaries if item["runId"] == child["run_id"])
+
+    assert match["status"] == "syncing"
+
+
 def test_clone_primary_batches_to_run_copies_batches_and_cases(store):
     parent, parent_batch = seed_finished_run_with_cases(
         store,
