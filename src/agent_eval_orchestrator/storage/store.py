@@ -817,9 +817,17 @@ class Store:
             raise RuntimeError("target run not found")
         mapping: dict[str, str] = {}
         now = now_iso()
-        source_batches = self.list_primary_batches_for_run(source_run_id)
         with self.connect() as conn:
-            for source in source_batches:
+            source_rows = conn.execute(
+                """
+                SELECT * FROM batches
+                WHERE run_id = ? AND batch_kind = 'primary'
+                ORDER BY created_at ASC, batch_id ASC
+                """,
+                (source_run_id,),
+            ).fetchall()
+            for source_row in source_rows:
+                source = self._batch_item(source_row)
                 new_batch_id = new_id("batch")
                 batch_root = str(self.layout.batch_dir(target_run["owner"], target_run_id, new_batch_id))
                 self.layout.batch_dir(target_run["owner"], target_run_id, new_batch_id).mkdir(
@@ -857,7 +865,12 @@ class Store:
                         source.get("error_text"),
                     ),
                 )
-                for case in self.list_case_runs(str(source["batch_id"])):
+                case_rows = conn.execute(
+                    "SELECT * FROM case_runs WHERE batch_id = ? ORDER BY case_id",
+                    (str(source["batch_id"]),),
+                ).fetchall()
+                for case_row in case_rows:
+                    case = self._case_item(case_row)
                     conn.execute(
                         """
                         INSERT INTO case_runs(
@@ -879,7 +892,7 @@ class Store:
                         ),
                     )
                 mapping[str(source["batch_id"])] = new_batch_id
-            if source_batches:
+            if source_rows:
                 conn.execute(
                     "UPDATE runs SET latest_batch_id = ?, updated_at = ? WHERE run_id = ?",
                     (list(mapping.values())[-1], now, target_run_id),
