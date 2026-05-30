@@ -5,6 +5,11 @@ from typing import TYPE_CHECKING, Any
 
 from agent_eval_orchestrator.controller.asset_syncer import build_sync_manifest, validate_create_task_assets
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
+from agent_eval_orchestrator.controller.rerun_artifacts import (
+    copy_jobs_tree,
+    delete_trials_for_cases,
+    derived_jobs_dir_for_run,
+)
 from agent_eval_orchestrator.core.defaults import DEFAULT_HARBOR_REPO, DEFAULT_PER_WORKER_CONCURRENCY
 from agent_eval_orchestrator.core.ids import new_id
 
@@ -95,6 +100,13 @@ class RunRerunCoordinator:
                     worker_shards=worker_shards,
                     all_case_ids=all_case_ids,
                 )
+            else:
+                self._set_derived_template_jobs_dir(run=derived_run)
+            self._copy_and_prune_source_jobs(
+                source_template=source_template,
+                derived_run=derived_run,
+                case_ids=all_case_ids,
+            )
 
             cloned_batch_ids = self.store.clone_primary_batches_to_run(
                 source_run_id=run_id,
@@ -251,6 +263,8 @@ class RunRerunCoordinator:
         for key in RERUN_CONFIG_KEYS:
             if key not in config:
                 continue
+            if key == "jobsDir":
+                continue
             value = config.get(key)
             if key == "executorConfig":
                 if value not in (None, {}):
@@ -325,8 +339,7 @@ class RunRerunCoordinator:
         except RuntimeError as exc:
             raise RerunValidationError(400, str(exc)) from exc
         jobs_dir = str(
-            config.get("jobsDir")
-            or existing_executor_config.get("combinedJobsDir")
+            existing_executor_config.get("combinedJobsDir")
             or (DEFAULT_HARBOR_REPO / "jobs")
         )
         workers_by_id = {str(item["worker_id"]): item for item in workers}
@@ -395,11 +408,7 @@ class RunRerunCoordinator:
                 or ""
             )
         ).expanduser()
-        jobs_dir = str(
-            config.get("jobsDir")
-            or existing_executor_config.get("combinedJobsDir")
-            or (DEFAULT_HARBOR_REPO / "jobs")
-        )
+        jobs_dir = str(derived_jobs_dir_for_run(store=self.store, run=run))
         worker_ids = list(worker_shards.keys())
         submitted_executor_config = config.get("executorConfig")
         if submitted_executor_config is None:
@@ -474,6 +483,31 @@ class RunRerunCoordinator:
             sync_manifest=manifest,
         )
         return int(executor_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
+
+    def _set_derived_template_jobs_dir(self, *, run: dict[str, Any]) -> None:
+        template = self.store.get_task_template(str(run["template_id"]))
+        if not template:
+            raise RerunValidationError(404, "task template not found")
+        self.store.update_task_template_executor_config(
+            str(template["template_id"]),
+            {"combinedJobsDir": str(derived_jobs_dir_for_run(store=self.store, run=run))},
+        )
+
+    def _copy_and_prune_source_jobs(
+        self,
+        *,
+        source_template: dict[str, Any],
+        derived_run: dict[str, Any],
+        case_ids: list[str],
+    ) -> None:
+        source_jobs_dir = str(
+            (source_template.get("executor_config") or {}).get("combinedJobsDir") or ""
+        ).strip()
+        if not source_jobs_dir:
+            return
+        target_jobs_dir = derived_jobs_dir_for_run(store=self.store, run=derived_run)
+        copy_jobs_tree(Path(source_jobs_dir).expanduser(), target_jobs_dir)
+        delete_trials_for_cases(jobs_dir=target_jobs_dir, case_ids=case_ids)
 
     def _filter_worker_maps(self, body_config: dict[str, Any], worker_ids: list[str]) -> dict[str, Any]:
         allowed = set(worker_ids)

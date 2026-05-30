@@ -1,8 +1,10 @@
+import json
 import os
 
 import pytest
 
 import agent_eval_orchestrator.controller.run_rerun_coordinator as rerun_coordinator_module
+from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator, RerunValidationError
 from conftest import seed_finished_run_with_cases
 
@@ -320,6 +322,16 @@ def _make_worker_local(store, tmp_path):
     )
 
 
+def _write_jobs_trial(job_dir, trial_name, *, task_name):
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps({"trial_name": trial_name, "task_name": task_name}),
+        encoding="utf-8",
+    )
+    return trial_dir
+
+
 def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,
@@ -380,7 +392,9 @@ def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp
     assert executor_config["agentTimeoutMultiplier"] == 3.4
     assert executor_config["verifierTimeoutMultiplier"] == 2.4
     assert executor_config["environmentBuildTimeoutMultiplier"] == 1.8
-    assert executor_config["combinedJobsDir"] == assets["jobsDir"]
+    expected_jobs_dir = derived_jobs_dir_for_run(store=store, run=derived_run)
+    assert executor_config["combinedJobsDir"] == str(expected_jobs_dir)
+    assert executor_config["combinedJobsDir"] != assets["jobsDir"]
     manifest = derived_run["sync_manifest"]
     assert manifest["datasetPath"] == assets["datasetPath"]
     assert manifest["bitfunCliPath"] == assets["bitfunCliPath"]
@@ -392,6 +406,65 @@ def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp
     assert job["run_id"] == result["runId"]
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
     assert rerun_batch["batch_options"]["concurrency"] == 3
+
+
+def test_start_rerun_applies_config_and_prunes_copied_jobs_in_derived_run(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": "exc-a",
+                "status": "errored",
+                "error_text": "boom",
+                "metrics": {"errorType": "TimeoutError"},
+            },
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    _make_worker_local(store, tmp_path)
+    assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
+    original_jobs_dir = tmp_path / "original-harbor" / "jobs"
+    original_job = original_jobs_dir / "merged-job"
+    errored_trial = _write_jobs_trial(original_job, "exc-a__old", task_name="exc-a")
+    succeeded_trial = _write_jobs_trial(original_job, "ok__old", task_name="ok")
+    submitted_jobs_dir = tmp_path / "submitted-override" / "jobs"
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {"combinedJobsDir": str(original_jobs_dir), "nConcurrent": 1},
+    )
+    original_template = store.get_task_template(run["template_id"])
+    original_run = store.get_run(run["run_id"])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    result = coordinator.start_rerun(
+        run["run_id"],
+        config={
+            "datasetPath": assets["datasetPath"],
+            "bitfunCliPath": assets["bitfunCliPath"],
+            "bitfunConfigDir": assets["bitfunConfigDir"],
+            "jobsDir": str(submitted_jobs_dir),
+            "executorConfig": {"nConcurrent": 2},
+            "selectedErrorTypes": ["TimeoutError"],
+        },
+    )
+
+    assert store.get_task_template(run["template_id"]) == original_template
+    assert store.get_run(run["run_id"]) == original_run
+    assert errored_trial.exists()
+    assert succeeded_trial.exists()
+
+    derived_run = store.get_run(result["runId"])
+    derived_template = store.get_task_template(derived_run["template_id"])
+    executor_config = derived_template["executor_config"]
+    derived_jobs_dir = derived_jobs_dir_for_run(store=store, run=derived_run)
+    assert derived_template["dataset_ref"] == assets["datasetPath"]
+    assert executor_config["nConcurrent"] == 2
+    assert executor_config["combinedJobsDir"] == str(derived_jobs_dir)
+    assert result["runId"] in executor_config["combinedJobsDir"]
+    assert executor_config["combinedJobsDir"] != str(submitted_jobs_dir)
+    assert executor_config["combinedJobsDir"] != str(original_jobs_dir)
+    assert not (derived_jobs_dir / "merged-job" / "exc-a__old").exists()
+    assert (derived_jobs_dir / "merged-job" / "ok__old" / "result.json").exists()
 
 
 def test_start_rerun_config_validation_happens_before_job_creation(store, tmp_path):
