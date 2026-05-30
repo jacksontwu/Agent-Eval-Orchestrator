@@ -193,7 +193,18 @@ def _job_sources_for_run(
     merged_job_name = sanitize_name(str(run["display_name"]))
     is_derived_run = bool(run.get("parent_run_id"))
     sources: list[Path] = []
-    for batch in store.list_primary_batches_for_run(run_id):
+    primary_batches = store.list_primary_batches_for_run(run_id)
+    primary_batch_ids = {str(batch["batch_id"]) for batch in primary_batches}
+    if is_derived_run and jobs_dir.exists():
+        for child in sorted(jobs_dir.iterdir(), key=lambda path: path.name):
+            if (
+                child.is_dir()
+                and child.name != merged_job_name
+                and child.name not in primary_batch_ids
+                and (child / "config.json").exists()
+            ):
+                sources.append(child.resolve())
+    for batch in primary_batches:
         artifact_index = batch.get("artifact_index") or {}
         candidates: list[Path] = []
         raw_job_dir = str(artifact_index.get("jobDir") or "").strip()
