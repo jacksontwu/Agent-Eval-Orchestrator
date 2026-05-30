@@ -1,5 +1,6 @@
 import json
 import os
+from threading import Event, Lock, Thread
 
 import pytest
 
@@ -167,6 +168,69 @@ def test_start_rerun_marks_derived_run_failed_when_asset_sync_start_raises(store
 
     retry = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(run["run_id"])
     assert retry["rerunStatus"] == "syncing"
+
+
+def test_start_rerun_reserves_active_child_before_second_start_can_pass_check(store, monkeypatch):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+    original_create_run = store.create_run
+    entered_first_child_create = Event()
+    second_child_create_before_first_reserved = Event()
+    release_first_child_create = Event()
+    slow_once_lock = Lock()
+    slow_once = {"pending": True}
+
+    def slow_first_derived_create_run(*, template_id, display_name=None, parent_run_id=None):
+        should_wait = False
+        if parent_run_id == run["run_id"]:
+            with slow_once_lock:
+                if slow_once["pending"]:
+                    slow_once["pending"] = False
+                    should_wait = True
+                elif not release_first_child_create.is_set():
+                    second_child_create_before_first_reserved.set()
+        if should_wait:
+            entered_first_child_create.set()
+            assert release_first_child_create.wait(timeout=5)
+        return original_create_run(
+            template_id=template_id,
+            display_name=display_name,
+            parent_run_id=parent_run_id,
+        )
+
+    monkeypatch.setattr(store, "create_run", slow_first_derived_create_run)
+    results = []
+    errors = []
+
+    def start() -> None:
+        try:
+            results.append(coordinator.start_rerun(run["run_id"]))
+        except Exception as exc:
+            errors.append(exc)
+
+    first = Thread(target=start)
+    first.start()
+    assert entered_first_child_create.wait(timeout=5)
+    second = Thread(target=start)
+    second.start()
+    second_child_create_before_first_reserved.wait(timeout=1)
+    release_first_child_create.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert not second_child_create_before_first_reserved.is_set()
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], RerunValidationError)
+    assert errors[0].code == 409
+    assert [run["rerun_status"] for run in _derived_runs_for_parent(store, run["run_id"])] == [
+        "syncing"
+    ]
 
 
 def test_start_rerun_splits_same_worker_reruns_by_parent_batch(coordinator, store):

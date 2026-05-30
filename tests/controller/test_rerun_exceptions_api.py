@@ -8,7 +8,7 @@ from unittest.mock import patch
 from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
 from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator
-from agent_eval_orchestrator.controller.server import Handler, ThreadedServer
+from agent_eval_orchestrator.controller.server import Handler, ThreadedServer, _job_sources_for_run
 from agent_eval_orchestrator.core.ids import sanitize_name
 from conftest import seed_finished_run_with_cases
 
@@ -80,6 +80,44 @@ def _write_jobs_trial(job_dir: Path, trial_name: str, *, task_name: str) -> Path
         encoding="utf-8",
     )
     return trial_dir
+
+
+def test_job_sources_for_derived_run_uses_derived_imported_source_not_original_job_dir(store, tmp_path):
+    run, parent_batch = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom"},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    original_job_dir = tmp_path / "original-jobs" / parent_batch["batch_id"]
+    original_job_dir.mkdir(parents=True)
+    store.update_batch_progress(
+        batch_id=parent_batch["batch_id"],
+        worker_id="worker-a",
+        status="succeeded",
+        current_step=None,
+        finished=True,
+        artifact_index={"jobDir": str(original_job_dir)},
+    )
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(run["run_id"])
+    derived_run = store.get_run(result["runId"])
+    derived_primary = store.list_primary_batches_for_run(result["runId"])[0]
+    derived_imported_dir = (
+        store.layout.controller_dir / "imported-jobs" / derived_primary["batch_id"]
+    )
+    derived_imported_dir.mkdir(parents=True)
+    derived_jobs_dir = derived_jobs_dir_for_run(store=store, run=derived_run)
+
+    grouped_sources = _job_sources_for_run(
+        store=store,
+        run_id=result["runId"],
+        jobs_dir=derived_jobs_dir,
+    )
+
+    assert grouped_sources == [
+        (sanitize_name(derived_run["display_name"]), [derived_imported_dir.resolve()])
+    ]
 
 
 def test_post_rerun_exceptions_happy_path(store, tmp_path):

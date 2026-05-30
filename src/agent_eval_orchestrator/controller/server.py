@@ -191,12 +191,13 @@ def _job_sources_for_run(
     if not run:
         return []
     merged_job_name = sanitize_name(str(run["display_name"]))
+    is_derived_run = bool(run.get("parent_run_id"))
     sources: list[Path] = []
     for batch in store.list_primary_batches_for_run(run_id):
         artifact_index = batch.get("artifact_index") or {}
         candidates: list[Path] = []
         raw_job_dir = str(artifact_index.get("jobDir") or "").strip()
-        if raw_job_dir:
+        if raw_job_dir and not is_derived_run:
             candidates.append(Path(raw_job_dir).expanduser())
         candidates.extend(
             [
@@ -204,6 +205,10 @@ def _job_sources_for_run(
                 jobs_dir / str(batch["batch_id"]),
             ]
         )
+        if raw_job_dir and is_derived_run:
+            artifact_job_dir = Path(raw_job_dir).expanduser()
+            if _is_subpath(artifact_job_dir, jobs_dir):
+                candidates.append(artifact_job_dir)
         source = next(
             (path.resolve() for path in candidates if str(path).strip() and path.exists()),
             None,

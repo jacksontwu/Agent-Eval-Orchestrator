@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,7 @@ class RunRerunCoordinator:
     def __init__(self, *, store: Store, asset_syncer: AssetSyncer | None) -> None:
         self.store = store
         self.asset_syncer = asset_syncer
+        self._start_lock = threading.Lock()
 
     def start_rerun(self, run_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
         run = self.store.get_run(run_id)
@@ -39,10 +41,6 @@ class RunRerunCoordinator:
             raise RerunValidationError(404, "run not found")
         if not self.store.is_run_primary_terminal(run_id):
             raise RerunValidationError(409, "run not finished")
-        if str(run.get("rerun_status") or "") in {"syncing", "running"}:
-            raise RerunValidationError(409, "rerun already in progress")
-        if self.store.list_active_derived_reruns(run_id):
-            raise RerunValidationError(409, "rerun already in progress")
         selected_error_types = self._resolve_selected_error_types(run_id=run_id, config=config)
         if not selected_error_types:
             raise RerunValidationError(400, "no exception cases")
@@ -86,30 +84,39 @@ class RunRerunCoordinator:
                 worker_shards=worker_shards,
                 all_case_ids=all_case_ids,
             )
-        derived_template = self.store.clone_task_template(
-            str(source_template["template_id"]),
-            name=f"{source_template['name']} rerun",
-        )
-        derived_run = self.store.create_run(
-            template_id=str(derived_template["template_id"]),
-            display_name=f"{run['display_name']} rerun",
-            parent_run_id=run_id,
-        )
         job_id = new_id("rerun")
+        derived_run: dict[str, Any] | None = None
         try:
-            self.store.create_run_rerun_job(
-                job_id=job_id,
-                run_id=str(derived_run["run_id"]),
-                case_ids=all_case_ids,
-                worker_shards=worker_shards,
-                rerun_batches={},
-                selected_error_types=selected_error_types,
-            )
-            self.store.update_run_rerun_fields(
-                run_id=str(derived_run["run_id"]),
-                rerun_status="syncing",
-                rerun_job_id=job_id,
-            )
+            with self._start_lock:
+                current_run = self.store.get_run(run_id)
+                if not current_run:
+                    raise RerunValidationError(404, "run not found")
+                if str(current_run.get("rerun_status") or "") in {"syncing", "running"}:
+                    raise RerunValidationError(409, "rerun already in progress")
+                if self.store.list_active_derived_reruns(run_id):
+                    raise RerunValidationError(409, "rerun already in progress")
+                derived_template = self.store.clone_task_template(
+                    str(source_template["template_id"]),
+                    name=f"{source_template['name']} rerun",
+                )
+                derived_run = self.store.create_run(
+                    template_id=str(derived_template["template_id"]),
+                    display_name=f"{run['display_name']} rerun",
+                    parent_run_id=run_id,
+                )
+                self.store.create_run_rerun_job(
+                    job_id=job_id,
+                    run_id=str(derived_run["run_id"]),
+                    case_ids=all_case_ids,
+                    worker_shards=worker_shards,
+                    rerun_batches={},
+                    selected_error_types=selected_error_types,
+                )
+                self.store.update_run_rerun_fields(
+                    run_id=str(derived_run["run_id"]),
+                    rerun_status="syncing",
+                    rerun_job_id=job_id,
+                )
             rerun_concurrency: int | None = None
             if config_supplied:
                 rerun_concurrency = self._apply_config(
@@ -164,11 +171,12 @@ class RunRerunCoordinator:
             if self.asset_syncer is not None:
                 self.asset_syncer.start_rerun_sync_async(job_id=job_id, run_id=str(derived_run["run_id"]))
         except Exception as exc:
-            self._mark_derived_rerun_failed(
-                run_id=str(derived_run["run_id"]),
-                job_id=job_id,
-                error_text=str(exc),
-            )
+            if derived_run is not None:
+                self._mark_derived_rerun_failed(
+                    run_id=str(derived_run["run_id"]),
+                    job_id=job_id,
+                    error_text=str(exc),
+                )
             raise
 
         return {
