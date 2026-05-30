@@ -126,6 +126,55 @@ def test_eval_task_summary_uses_active_derived_rerun_status(store):
     assert match["status"] == "syncing"
 
 
+def test_eval_task_summary_includes_derived_run_lineage(store):
+    parent, _ = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc", "status": "errored", "error_text": "boom"}],
+    )
+    child = _create_child_run(store, parent)
+
+    summaries = {item["runId"]: item for item in store.list_eval_task_summaries()}
+
+    assert summaries[parent["run_id"]]["parentRunId"] is None
+    assert summaries[parent["run_id"]]["isDerivedRun"] is False
+    assert summaries[child["run_id"]]["parentRunId"] == parent["run_id"]
+    assert summaries[child["run_id"]]["isDerivedRun"] is True
+
+
+def test_eval_task_detail_includes_derived_lineage_and_parent_active_children(store):
+    parent, _ = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc", "status": "errored", "error_text": "boom"}],
+    )
+    active_child = _create_child_run(store, parent)
+    finished_child = _create_child_run(store, parent)
+    store.update_run_rerun_fields(run_id=active_child["run_id"], rerun_status="syncing")
+    store.update_run_rerun_fields(run_id=finished_child["run_id"], rerun_status="succeeded")
+
+    parent_detail = store.get_eval_task_detail(parent["run_id"])
+    child_detail = store.get_eval_task_detail(active_child["run_id"])
+
+    assert parent_detail["parentRunId"] is None
+    assert parent_detail["isDerivedRun"] is False
+    assert parent_detail["parentRun"] is None
+    assert parent_detail["activeDerivedReruns"] == [
+        {
+            "runId": active_child["run_id"],
+            "name": "child rerun",
+            "rerunStatus": "syncing",
+        }
+    ]
+    assert child_detail["parentRunId"] == parent["run_id"]
+    assert child_detail["isDerivedRun"] is True
+    assert child_detail["parentRun"] == {
+        "runId": parent["run_id"],
+        "name": parent["display_name"],
+        "status": "finished",
+        "rerunStatus": "idle",
+    }
+    assert child_detail["activeDerivedReruns"] == []
+
+
 def test_clone_primary_batches_to_run_copies_batches_and_cases(store):
     parent, parent_batch = seed_finished_run_with_cases(
         store,

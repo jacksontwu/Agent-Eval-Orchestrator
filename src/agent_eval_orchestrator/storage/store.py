@@ -34,6 +34,22 @@ class Store:
         return str(case.get("status") or "") == "failed" and not case.get("error_text")
 
     @staticmethod
+    def _overall_status_from_batch_counts(status_counts: dict[str, int], has_primary_batches: bool) -> str:
+        if status_counts["running"] > 0:
+            return "running"
+        if status_counts["pending_sync"] > 0:
+            return "syncing"
+        if status_counts["failed"] > 0 or status_counts["sync_failed"] > 0:
+            return "failed"
+        if status_counts["queued"] > 0:
+            return "queued"
+        if status_counts["succeeded"] > 0 and sum(status_counts.values()) == status_counts["succeeded"]:
+            return "finished"
+        if has_primary_batches:
+            return "mixed"
+        return "idle"
+
+    @staticmethod
     def case_error_type(case: dict[str, Any]) -> str:
         metrics = case.get("metrics") or {}
         raw = case.get("errorType") or metrics.get("errorType")
@@ -2118,20 +2134,9 @@ class Store:
                 case_failed += sum(1 for case in batch_cases if self._case_is_failed(case))
                 case_errored += sum(1 for case in batch_cases if self._case_is_errored(case))
 
-            overall_status = "idle"
-            if status_counts["running"] > 0:
-                overall_status = "running"
-            elif status_counts["pending_sync"] > 0:
-                overall_status = "syncing"
-            elif status_counts["failed"] > 0 or status_counts["sync_failed"] > 0:
-                overall_status = "failed"
-            elif status_counts["queued"] > 0:
-                overall_status = "queued"
-            elif status_counts["succeeded"] > 0 and sum(status_counts.values()) == status_counts["succeeded"]:
-                overall_status = "finished"
-            elif primary_batches:
-                overall_status = "mixed"
+            overall_status = self._overall_status_from_batch_counts(status_counts, bool(primary_batches))
             rerun_status = str(run.get("rerun_status") or "idle")
+            parent_run_id = run.get("parent_run_id")
             if run.get("parent_run_id") and rerun_status in {"syncing", "running"}:
                 overall_status = rerun_status
 
@@ -2140,6 +2145,8 @@ class Store:
                     "evalTaskId": run["run_id"],
                     "runId": run["run_id"],
                     "name": run["display_name"],
+                    "parentRunId": parent_run_id,
+                    "isDerivedRun": bool(parent_run_id),
                     "templateId": template["template_id"] if template else None,
                     "templateName": template["name"] if template else None,
                     "owner": run["owner"],
@@ -2159,6 +2166,23 @@ class Store:
                 }
             )
         return summaries
+
+    def _run_lineage_summary(self, run: dict[str, Any]) -> dict[str, Any]:
+        primary_batches = self.list_primary_batches_for_run(str(run["run_id"]))
+        status_counts = {
+            "queued": 0, "pending_sync": 0, "sync_failed": 0,
+            "running": 0, "succeeded": 0, "failed": 0, "stopped": 0,
+        }
+        for batch in primary_batches:
+            status = str(batch["status"])
+            if status in status_counts:
+                status_counts[status] += 1
+        return {
+            "runId": run["run_id"],
+            "name": run["display_name"],
+            "status": self._overall_status_from_batch_counts(status_counts, bool(primary_batches)),
+            "rerunStatus": str(run.get("rerun_status") or "idle"),
+        }
 
     def get_eval_task_detail(self, run_id: str) -> dict[str, Any] | None:
         run = self.get_run(run_id)
@@ -2251,22 +2275,31 @@ class Store:
             merged_jobs_dir=merged_jobs_dir,
         )
         rerun_status = str(run.get("rerun_status") or "idle")
-        active_derived_rerun = (
-            False
-            if run.get("parent_run_id")
-            else bool(self.list_active_derived_reruns(run_id))
-        )
+        parent_run_id = run.get("parent_run_id")
+        parent_run = self.get_run(str(parent_run_id)) if parent_run_id else None
+        active_derived_reruns = [] if parent_run_id else [
+            {
+                "runId": item["run_id"],
+                "name": item["display_name"],
+                "rerunStatus": str(item.get("rerun_status") or "idle"),
+            }
+            for item in self.list_active_derived_reruns(run_id)
+        ]
         can_rerun = (
             self.is_run_primary_terminal(run_id)
             and exception_count > 0
             and rerun_status not in {"syncing", "running"}
-            and not active_derived_rerun
+            and not active_derived_reruns
         )
         return {
             "run": run,
             "template": template,
             "batches": batches,
             "workerGroups": worker_group_list,
+            "parentRunId": parent_run_id,
+            "isDerivedRun": bool(parent_run_id),
+            "parentRun": self._run_lineage_summary(parent_run) if parent_run else None,
+            "activeDerivedReruns": active_derived_reruns,
             "canRerunExceptions": can_rerun,
             "exceptionCount": exception_count,
             "exceptionDisplay": exception_display,

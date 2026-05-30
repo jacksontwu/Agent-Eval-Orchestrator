@@ -682,6 +682,7 @@ class Handler(BaseHTTPRequestHandler):
                 self,
                 {
                     "runId": run_id,
+                    "parentRunId": run.get("parent_run_id"),
                     "rerunStatus": run.get("rerun_status") or "idle",
                     "rerunJobId": run.get("rerun_job_id"),
                     "errorText": error_text,

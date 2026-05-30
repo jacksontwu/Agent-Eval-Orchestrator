@@ -339,6 +339,54 @@ def test_get_rerun_status_includes_list_valued_rerun_batches(store, tmp_path):
     server.shutdown()
 
 
+def test_get_rerun_status_includes_parent_run_id_for_derived_run(store, tmp_path):
+    parent, parent_batch = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    child_template = store.clone_task_template(parent["template_id"], name="child")
+    child_run = store.create_run(
+        template_id=child_template["template_id"],
+        display_name="child rerun",
+        parent_run_id=parent["run_id"],
+    )
+    rerun_batch = store.create_batch(
+        run_id=child_run["run_id"],
+        selected_case_ids=["exc-a"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="running",
+        batch_kind="exception_rerun",
+        parent_batch_id=parent_batch["batch_id"],
+    )
+    store.create_run_rerun_job(
+        job_id="rerun-derived",
+        run_id=child_run["run_id"],
+        case_ids=["exc-a"],
+        worker_shards={"worker-a": ["exc-a"]},
+        rerun_batches={"worker-a": rerun_batch["batch_id"]},
+    )
+    store.update_run_rerun_fields(
+        run_id=child_run["run_id"],
+        rerun_status="running",
+        rerun_job_id="rerun-derived",
+    )
+    server = start_test_server(store, tmp_path, 9900)
+    conn = HTTPConnection("127.0.0.1", 9900)
+    conn.request(
+        "GET",
+        f"/api/runs/{child_run['run_id']}/rerun",
+        headers={"X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+
+    assert resp.status == 200
+    assert payload["runId"] == child_run["run_id"]
+    assert payload["parentRunId"] == parent["run_id"]
+    server.shutdown()
+
+
 def test_heartbeat_merges_exception_rerun_into_parent(store, tmp_path):
     run, parent = seed_finished_run_with_cases(
         store,

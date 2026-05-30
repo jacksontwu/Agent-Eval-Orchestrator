@@ -808,8 +808,40 @@ INDEX_HTML = """<!doctype html>
       return badge(entry[0], entry[1]);
     }
 
+    function shortRunId(runId) {
+      const text = String(runId || "");
+      return text.length > 12 ? text.slice(0, 12) : text;
+    }
+
+    function taskLineageMarker(task) {
+      if (!task.parentRunId) return "";
+      return '<span>rerun of <code>' + esc(shortRunId(task.parentRunId)) + '</code></span>';
+    }
+
+    function renderLineageHint(detail) {
+      const parts = [];
+      if (detail.parentRunId) {
+        const parent = detail.parentRun || {};
+        const parentLabel = parent.name
+          ? esc(parent.name) + ' <code>' + esc(shortRunId(detail.parentRunId)) + '</code>'
+          : '<code>' + esc(shortRunId(detail.parentRunId)) + '</code>';
+        parts.push('derived rerun of ' + parentLabel);
+      }
+      const active = detail.activeDerivedReruns || [];
+      if (active.length) {
+        const labels = active.map(item => {
+          const label = item.name || item.runId || "";
+          return esc(label) + ' <code>' + esc(shortRunId(item.runId)) + '</code>' + rerunStatusBadge(item.rerunStatus);
+        });
+        parts.push('active derived rerun: ' + labels.join(", "));
+      }
+      if (!parts.length) return "";
+      return '<div class="subtle" style="margin-bottom:12px">' + parts.join(" · ") + '</div>';
+    }
+
     function rerunDisabledReason(detail) {
       if (!detail) return "Run 尚未全部完成";
+      if ((detail.activeDerivedReruns || []).length) return "已有派生重跑任务进行中";
       const status = String(detail.run?.status || detail.status || "").toLowerCase();
       const primaryFinished = detail.canRerunExceptions !== undefined
         ? detail.canRerunExceptions || detail.rerunStatus === "syncing" || detail.rerunStatus === "running"
@@ -1064,6 +1096,7 @@ INDEX_HTML = """<!doctype html>
           '<div class="item-meta">' +
             '<span>workers: ' + esc((task.workers || []).join(", ") || "-") + '</span>' +
             '<span>run: <code>' + esc(task.runId) + '</code></span>' +
+            taskLineageMarker(task) +
             '<span>batches: ' + task.batchCount + '</span>' +
             '<span>cases: ' + task.caseSucceeded + '/' + task.caseTotal +
               (task.caseErrored ? ' · exception: ' + task.caseErrored : '') +
@@ -1219,6 +1252,7 @@ INDEX_HTML = """<!doctype html>
           '<div class="stat"><div class="subtle">Run ID</div><strong><code>' + esc(run.run_id) + '</code></strong></div>' +
           '<div class="stat"><div class="subtle">Executor</div><strong><code>' + esc(template.executor_kind) + '</code></strong></div>' +
         '</div>' +
+        renderLineageHint(detail) +
         (detail.exceptionCount ? (
           '<div class="subtle" style="margin-bottom:12px" title="' + esc(formatExceptionDisplayHint(detail)) + '">' +
             esc(exceptionLine) +
@@ -1715,6 +1749,7 @@ INDEX_HTML = """<!doctype html>
         closeRerunConfigModal();
         if (state.rerunPollTimer) clearInterval(state.rerunPollTimer);
         state.selectedTaskId = rerunRunId;
+        await loadDashboard();
         state.rerunPollTimer = setInterval(() => pollRerunJob(rerunRunId), 2500);
         await pollRerunJob(rerunRunId);
         if (rerunRunId !== originalRunId) {
