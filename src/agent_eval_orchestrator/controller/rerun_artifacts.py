@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-if False:
+if TYPE_CHECKING:
     from agent_eval_orchestrator.storage.store import Store
 
 
@@ -16,6 +16,10 @@ def derived_jobs_dir_for_run(*, store: "Store", run: dict[str, Any]) -> Path:
 def copy_jobs_tree(source: Path, target: Path) -> None:
     if not source.exists() or not source.is_dir():
         raise RuntimeError(f"source jobs directory not found: {source}")
+    if source.resolve() == target.resolve():
+        raise RuntimeError(f"source and target jobs directories must differ: {source}")
+    if target.exists() and (target.is_symlink() or not target.is_dir()):
+        raise RuntimeError(f"target jobs path exists but is not a directory: {target}")
     if target.exists():
         shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)

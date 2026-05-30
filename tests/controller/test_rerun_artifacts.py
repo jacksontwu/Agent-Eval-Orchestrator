@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_eval_orchestrator.controller.rerun_artifacts import (
     copy_jobs_tree,
     delete_trials_for_cases,
@@ -44,6 +46,30 @@ def test_copy_jobs_tree_replaces_existing_target(tmp_path):
 
     assert (target / "merged" / "case-a__old" / "result.json").exists()
     assert not (target / "stale").exists()
+
+
+def test_copy_jobs_tree_rejects_same_source_and_target(tmp_path):
+    source = tmp_path / "jobs"
+    _write_trial(source / "merged", "case-a__old")
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, source)
+
+    assert "must differ" in str(exc.value)
+    assert (source / "merged" / "case-a__old" / "result.json").exists()
+
+
+def test_copy_jobs_tree_rejects_non_directory_target(tmp_path):
+    source = tmp_path / "source-jobs"
+    target = tmp_path / "target-jobs"
+    _write_trial(source / "merged", "case-a__old")
+    target.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, target)
+
+    assert "target jobs path exists but is not a directory" in str(exc.value)
+    assert target.read_text(encoding="utf-8") == "not a directory"
 
 
 def test_delete_trials_for_cases_removes_only_selected_trials(tmp_path):
