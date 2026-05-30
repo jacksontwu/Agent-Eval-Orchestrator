@@ -1714,10 +1714,11 @@ INDEX_HTML = """<!doctype html>
         const rerunRunId = result.runId || originalRunId;
         closeRerunConfigModal();
         if (state.rerunPollTimer) clearInterval(state.rerunPollTimer);
+        state.selectedTaskId = rerunRunId;
         state.rerunPollTimer = setInterval(() => pollRerunJob(rerunRunId), 2500);
         await pollRerunJob(rerunRunId);
-        if (result.runId && result.runId !== originalRunId) {
-          await loadTaskDetail(result.runId);
+        if (rerunRunId !== originalRunId) {
+          await loadTaskDetail(rerunRunId);
         }
       } catch (error) {
         if (state.rerunConfig) {
