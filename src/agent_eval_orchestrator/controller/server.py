@@ -34,7 +34,11 @@ from agent_eval_orchestrator.controller.asset_syncer import (
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
 from agent_eval_orchestrator.normalizers.harbor import normalize_harbor_job
-from agent_eval_orchestrator.normalizers.harbor_job_merge import copy_trial_dirs, write_merged_job
+from agent_eval_orchestrator.normalizers.harbor_job_merge import (
+    copy_trial_dirs,
+    refresh_job_result,
+    write_merged_job,
+)
 from agent_eval_orchestrator.normalizers.harbor_timestamps import normalize_jobs_dir
 from agent_eval_orchestrator.controller.provisioner import Provisioner
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator, RerunValidationError
@@ -153,6 +157,7 @@ def _apply_exception_rerun_merge(
     if rerun_imported.exists():
         copy_trial_dirs(rerun_imported, parent_imported)
     parent_batch = store.get_batch(parent_batch_id)
+    rerun_job_dir: Path | None = None
     if parent_batch:
         parent_job_dir = Path(str(parent_batch["batch_root"])) / "harbor" / "jobs" / parent_batch_id
         rerun_job_dir = Path(str(batch_row["batch_root"])) / "harbor" / "jobs" / batch_id
@@ -161,13 +166,22 @@ def _apply_exception_rerun_merge(
             copy_trial_dirs(rerun_job_dir, parent_job_dir)
     store.finish_rerun_batch_if_complete(rerun_batch_id=batch_id)
     run_row = store.get_run(str(batch_row["run_id"]))
-    if run_row and str(run_row.get("rerun_status") or "") in {"succeeded", "failed"}:
-        metadata = batch_row.get("executor_metadata") or {}
-        resolved_jobs_dir = Path(
-            str(metadata.get("combinedJobsDir") or DEFAULT_JOBS_DIR)
-        ).expanduser().resolve()
-        if jobs_dir is not None:
-            resolved_jobs_dir = jobs_dir
+    metadata = batch_row.get("executor_metadata") or {}
+    resolved_jobs_dir = Path(
+        str(metadata.get("combinedJobsDir") or DEFAULT_JOBS_DIR)
+    ).expanduser().resolve()
+    if jobs_dir is not None:
+        resolved_jobs_dir = jobs_dir
+    if run_row and run_row.get("parent_run_id"):
+        final_job_dir = resolved_jobs_dir / sanitize_name(str(run_row["display_name"]))
+        source_for_final = rerun_imported if rerun_imported.exists() else rerun_job_dir
+        if source_for_final is not None and source_for_final.exists():
+            copy_trial_dirs(source_for_final, final_job_dir)
+            try:
+                refresh_job_result(job_dir=final_job_dir)
+            except RuntimeError:
+                pass
+    elif run_row and str(run_row.get("rerun_status") or "") in {"succeeded", "failed"}:
         try:
             _rebuild_merged_job_for_run(
                 store=store,

@@ -13,13 +13,17 @@ def derived_jobs_dir_for_run(*, store: "Store", run: dict[str, Any]) -> Path:
     return store.layout.run_dir(str(run["owner"]), str(run["run_id"])) / "harbor" / "jobs"
 
 
-def copy_jobs_tree(source: Path, target: Path) -> None:
+def derived_rerun_job_name(*, source_job_name: str, run_id: str) -> str:
+    return f"{source_job_name}-rerun-{run_id}"
+
+
+def _validate_distinct_paths(source: Path, target: Path, *, label: str) -> tuple[Path, Path]:
     if not source.exists() or not source.is_dir():
-        raise RuntimeError(f"source jobs directory not found: {source}")
+        raise RuntimeError(f"source {label} directory not found: {source}")
     resolved_source = source.resolve()
     resolved_target = target.resolve()
     if resolved_source == resolved_target:
-        raise RuntimeError(f"source and target jobs directories must differ: {source}")
+        raise RuntimeError(f"source and target {label} directories must differ: {source}")
     try:
         resolved_source.relative_to(resolved_target)
         overlaps = True
@@ -31,14 +35,39 @@ def copy_jobs_tree(source: Path, target: Path) -> None:
             overlaps = False
     if overlaps:
         raise RuntimeError(
-            f"source and target jobs directories must not overlap: {source} -> {target}"
+            f"source and target {label} directories must not overlap: {source} -> {target}"
         )
+    return resolved_source, resolved_target
+
+
+def copy_jobs_tree(source: Path, target: Path) -> None:
+    _validate_distinct_paths(source, target, label="jobs")
     if target.is_symlink() or (target.exists() and not target.is_dir()):
         raise RuntimeError(f"target jobs path exists but is not a directory: {target}")
     if target.exists():
         shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target)
+
+
+def copy_harbor_job(source_job_dir: Path, target_job_dir: Path) -> None:
+    _validate_distinct_paths(source_job_dir, target_job_dir, label="job")
+    if target_job_dir.is_symlink() or (target_job_dir.exists() and not target_job_dir.is_dir()):
+        raise RuntimeError(f"target job path exists but is not a directory: {target_job_dir}")
+    if target_job_dir.exists():
+        shutil.rmtree(target_job_dir)
+    target_job_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_job_dir, target_job_dir)
+    config_path = target_job_dir / "config.json"
+    if config_path.exists():
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload["job_name"] = target_job_dir.name
+            payload["jobs_dir"] = str(target_job_dir.parent)
+            config_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
 
 def _trial_case_id(trial_dir: Path) -> str:

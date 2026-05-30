@@ -548,7 +548,7 @@ def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp
     assert rerun_batch["batch_options"]["concurrency"] == 3
 
 
-def test_start_rerun_applies_config_and_prunes_copied_jobs_in_derived_run(store, tmp_path):
+def test_start_rerun_clones_only_source_job_to_final_rerun_job_without_pruning(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,
         cases=[
@@ -564,9 +564,23 @@ def test_start_rerun_applies_config_and_prunes_copied_jobs_in_derived_run(store,
     _make_worker_local(store, tmp_path)
     assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
     original_jobs_dir = tmp_path / "original-harbor" / "jobs"
-    original_job = original_jobs_dir / "merged-job"
+    original_job = original_jobs_dir / sanitize_name(str(run["display_name"]))
     errored_trial = _write_jobs_trial(original_job, "exc-a__old", task_name="exc-a")
+    (errored_trial / "exception.txt").write_text(
+        "Traceback (most recent call last):\nTimeoutError: boom\n",
+        encoding="utf-8",
+    )
     succeeded_trial = _write_jobs_trial(original_job, "ok__old", task_name="ok")
+    (original_job / "config.json").write_text(
+        json.dumps({"job_name": original_job.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
+    unrelated_job = original_jobs_dir / "unrelated-job"
+    _write_jobs_trial(unrelated_job, "other__old", task_name="other")
+    (unrelated_job / "config.json").write_text(
+        json.dumps({"job_name": unrelated_job.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
     submitted_jobs_dir = tmp_path / "submitted-override" / "jobs"
     store.update_task_template_executor_config(
         run["template_id"],
@@ -596,15 +610,17 @@ def test_start_rerun_applies_config_and_prunes_copied_jobs_in_derived_run(store,
     derived_run = store.get_run(result["runId"])
     derived_template = store.get_task_template(derived_run["template_id"])
     executor_config = derived_template["executor_config"]
-    derived_jobs_dir = derived_jobs_dir_for_run(store=store, run=derived_run)
+    final_job_dir = original_jobs_dir / f"{original_job.name}-rerun-{result['runId']}"
     assert derived_template["dataset_ref"] == assets["datasetPath"]
     assert executor_config["nConcurrent"] == 2
-    assert executor_config["combinedJobsDir"] == str(derived_jobs_dir)
-    assert result["runId"] in executor_config["combinedJobsDir"]
+    assert executor_config["combinedJobsDir"] == str(original_jobs_dir)
     assert executor_config["combinedJobsDir"] != str(submitted_jobs_dir)
-    assert executor_config["combinedJobsDir"] != str(original_jobs_dir)
-    assert not (derived_jobs_dir / "merged-job" / "exc-a__old").exists()
-    assert (derived_jobs_dir / "merged-job" / "ok__old" / "result.json").exists()
+    assert final_job_dir.exists()
+    assert (final_job_dir / "exc-a__old" / "result.json").exists()
+    assert (final_job_dir / "exc-a__old" / "exception.txt").exists()
+    assert (final_job_dir / "ok__old" / "result.json").exists()
+    assert not (original_jobs_dir / f"unrelated-job-rerun-{result['runId']}").exists()
+    assert not (final_job_dir / "unrelated-job").exists()
 
 
 def test_start_rerun_config_validation_happens_before_job_creation(store, tmp_path):
@@ -716,7 +732,7 @@ def test_start_rerun_resolves_truncated_case_ids_to_dataset_dirs(store, tmp_path
     assert job["worker_shards"]["worker-a"] == [long_selected]
 
 
-def test_start_rerun_prunes_copied_short_id_trial_when_case_id_resolves(store, tmp_path):
+def test_start_rerun_preserves_copied_short_id_trial_when_case_id_resolves(store, tmp_path):
     long_selected = (
         "instance_tutao__tutanota-fb32e5f9d9fc152a00144d56dd0af01760a2d4dc-"
         "vc4e41fd0029957297843cb9dec4a25c7c756f029"
@@ -745,13 +761,21 @@ def test_start_rerun_prunes_copied_short_id_trial_when_case_id_resolves(store, t
     _make_worker_local(store, tmp_path)
     assets = _prepare_rerun_assets(tmp_path, [long_selected])
     original_jobs_dir = tmp_path / "original-harbor" / "jobs"
-    original_job = original_jobs_dir / "merged-job"
+    original_job = original_jobs_dir / sanitize_name(str(run["display_name"]))
     short_trial = _write_jobs_trial(
         original_job,
         f"{short_case_id}__old",
         task_name=short_case_id,
     )
+    (short_trial / "exception.txt").write_text(
+        "Traceback (most recent call last):\nRuntimeError: boom\n",
+        encoding="utf-8",
+    )
     ok_trial = _write_jobs_trial(original_job, "ok__old", task_name="ok")
+    (original_job / "config.json").write_text(
+        json.dumps({"job_name": original_job.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
     store.update_task_template_executor_config(
         run["template_id"],
         {"combinedJobsDir": str(original_jobs_dir)},
@@ -772,9 +796,9 @@ def test_start_rerun_prunes_copied_short_id_trial_when_case_id_resolves(store, t
     assert short_trial.exists()
     assert ok_trial.exists()
     derived_run = store.get_run(result["runId"])
-    derived_jobs_dir = derived_jobs_dir_for_run(store=store, run=derived_run)
-    assert not (derived_jobs_dir / "merged-job" / f"{short_case_id}__old").exists()
-    assert (derived_jobs_dir / "merged-job" / "ok__old" / "result.json").exists()
+    final_job_dir = original_jobs_dir / f"{original_job.name}-rerun-{result['runId']}"
+    assert (final_job_dir / f"{short_case_id}__old" / "result.json").exists()
+    assert (final_job_dir / "ok__old" / "result.json").exists()
     job = store.get_run_rerun_job(result["rerunJobId"])
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
     assert rerun_batch["selected_case_ids"] == [long_selected]
@@ -795,7 +819,7 @@ def test_start_rerun_persists_job_error_when_source_jobs_copy_fails(store, tmp_p
     with pytest.raises(RuntimeError) as exc:
         coordinator.start_rerun(run["run_id"])
 
-    assert "source jobs directory not found" in str(exc.value)
+    assert "source job directory not found" in str(exc.value)
     derived_runs = _derived_runs_for_parent(store, run["run_id"])
     assert len(derived_runs) == 1
     failed_run = store.get_run(derived_runs[0]["run_id"])
@@ -806,7 +830,7 @@ def test_start_rerun_persists_job_error_when_source_jobs_copy_fails(store, tmp_p
     assert job["run_id"] == failed_run["run_id"]
     assert job["status"] == "failed"
     assert job["rerun_batches"] == {}
-    assert "source jobs directory not found" in job["error_text"]
+    assert "source job directory not found" in job["error_text"]
 
 
 def test_start_rerun_rejects_malformed_executor_config_before_job_creation(store, tmp_path):

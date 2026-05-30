@@ -54,6 +54,12 @@ def copy_trial_dirs(source_job_dir: Path, target_job_dir: Path) -> None:
         shutil.copytree(trial_dir, target_job_dir / trial_dir.name)
 
 
+def refresh_job_result(*, job_dir: Path, harbor_repo: Path | None = None) -> None:
+    if not _iter_trial_dirs(job_dir):
+        raise RuntimeError("no Harbor trial results found while refreshing job")
+    finalize_job_result_with_harbor(job_dir=job_dir, harbor_repo=harbor_repo)
+
+
 def resolve_controller_harbor_repo() -> Path:
     candidates: list[Path] = []
     env_repo = os.environ.get("HARBOR_REPO", "").strip()

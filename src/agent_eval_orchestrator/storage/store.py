@@ -514,6 +514,19 @@ class Store:
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return self._run_item(row) if row else None
 
+    def update_run_display_name(self, run_id: str, display_name: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET display_name = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (display_name, now_iso(), run_id),
+            )
+            row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        return self._run_item(row) if row else None
+
     def list_runs(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()

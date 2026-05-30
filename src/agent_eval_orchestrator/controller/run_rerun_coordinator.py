@@ -11,9 +11,9 @@ from agent_eval_orchestrator.controller.harbor_exceptions import (
     harbor_trial_case_id,
 )
 from agent_eval_orchestrator.controller.rerun_artifacts import (
-    copy_jobs_tree,
-    delete_trials_for_cases,
+    copy_harbor_job,
     derived_jobs_dir_for_run,
+    derived_rerun_job_name,
 )
 from agent_eval_orchestrator.core.defaults import DEFAULT_HARBOR_REPO, DEFAULT_PER_WORKER_CONCURRENCY
 from agent_eval_orchestrator.core.ids import new_id, sanitize_name
@@ -84,12 +84,6 @@ class RunRerunCoordinator:
             for case_ids in worker_shards.values()
             for case_id in case_ids
         ]
-        original_case_ids = [
-            str(item["case_id"])
-            for items in grouped.values()
-            for item in items
-        ]
-        prune_case_ids = list(dict.fromkeys([*all_case_ids, *original_case_ids]))
         asset_config = self._filter_config_for_assets(dict(config or {}))
         config_supplied = self._has_applicable_config(asset_config)
         if config_supplied:
@@ -120,6 +114,18 @@ class RunRerunCoordinator:
                     display_name=f"{run['display_name']} rerun",
                     parent_run_id=run_id,
                 )
+                source_job_dir = self._source_job_dir_for_run(run=run, template=source_template)
+                if source_job_dir is not None:
+                    final_job_name = derived_rerun_job_name(
+                        source_job_name=source_job_dir.name,
+                        run_id=str(derived_run["run_id"]),
+                    )
+                    updated_run = self.store.update_run_display_name(
+                        str(derived_run["run_id"]),
+                        final_job_name,
+                    )
+                    if updated_run is not None:
+                        derived_run = updated_run
                 self.store.create_run_rerun_job(
                     job_id=job_id,
                     run_id=str(derived_run["run_id"]),
@@ -143,11 +149,11 @@ class RunRerunCoordinator:
                     all_case_ids=all_case_ids,
                 )
             else:
-                self._set_derived_template_jobs_dir(run=derived_run)
+                self._set_derived_template_jobs_dir(run=derived_run, source_template=source_template)
             self._copy_and_prune_source_jobs(
                 source_template=source_template,
+                source_run=run,
                 derived_run=derived_run,
-                case_ids=prune_case_ids,
             )
 
             cloned_batch_ids = self.store.clone_primary_batches_to_run(
@@ -572,7 +578,10 @@ class RunRerunCoordinator:
                 or ""
             )
         ).expanduser()
-        jobs_dir = str(derived_jobs_dir_for_run(store=self.store, run=run))
+        jobs_dir = str(
+            existing_executor_config.get("combinedJobsDir")
+            or derived_jobs_dir_for_run(store=self.store, run=run)
+        )
         worker_ids = list(worker_shards.keys())
         submitted_executor_config = config.get("executorConfig")
         if submitted_executor_config is None:
@@ -648,30 +657,45 @@ class RunRerunCoordinator:
         )
         return int(executor_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
 
-    def _set_derived_template_jobs_dir(self, *, run: dict[str, Any]) -> None:
+    def _set_derived_template_jobs_dir(
+        self,
+        *,
+        run: dict[str, Any],
+        source_template: dict[str, Any],
+    ) -> None:
         template = self.store.get_task_template(str(run["template_id"]))
         if not template:
             raise RerunValidationError(404, "task template not found")
+        source_jobs_dir = str(
+            (source_template.get("executor_config") or {}).get("combinedJobsDir") or ""
+        ).strip()
         self.store.update_task_template_executor_config(
             str(template["template_id"]),
-            {"combinedJobsDir": str(derived_jobs_dir_for_run(store=self.store, run=run))},
+            {"combinedJobsDir": source_jobs_dir or str(derived_jobs_dir_for_run(store=self.store, run=run))},
         )
 
     def _copy_and_prune_source_jobs(
         self,
         *,
         source_template: dict[str, Any],
+        source_run: dict[str, Any],
         derived_run: dict[str, Any],
-        case_ids: list[str],
     ) -> None:
-        source_jobs_dir = str(
-            (source_template.get("executor_config") or {}).get("combinedJobsDir") or ""
-        ).strip()
-        if not source_jobs_dir:
+        source_job_dir = self._source_job_dir_for_run(run=source_run, template=source_template)
+        if source_job_dir is None:
+            source_jobs_dir = str(
+                (source_template.get("executor_config") or {}).get("combinedJobsDir") or ""
+            ).strip()
+            if source_jobs_dir:
+                expected = Path(source_jobs_dir).expanduser() / sanitize_name(str(source_run["display_name"]))
+                raise RuntimeError(f"source job directory not found: {expected}")
             return
-        target_jobs_dir = derived_jobs_dir_for_run(store=self.store, run=derived_run)
-        copy_jobs_tree(Path(source_jobs_dir).expanduser(), target_jobs_dir)
-        delete_trials_for_cases(jobs_dir=target_jobs_dir, case_ids=case_ids)
+        final_job_name = derived_rerun_job_name(
+            source_job_name=source_job_dir.name,
+            run_id=str(derived_run["run_id"]),
+        )
+        target_job_dir = source_job_dir.parent / final_job_name
+        copy_harbor_job(source_job_dir, target_job_dir)
 
     def _filter_worker_maps(self, body_config: dict[str, Any], worker_ids: list[str]) -> dict[str, Any]:
         allowed = set(worker_ids)

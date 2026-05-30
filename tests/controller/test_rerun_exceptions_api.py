@@ -507,7 +507,7 @@ def test_heartbeat_merges_exception_rerun_into_parent(store, tmp_path):
     server.shutdown()
 
 
-def test_heartbeat_merges_derived_exception_rerun_into_cloned_parent(store, tmp_path):
+def test_heartbeat_merges_derived_exception_rerun_into_final_rerun_job(store, tmp_path):
     run, original_parent = seed_finished_run_with_cases(
         store,
         cases=[
@@ -532,6 +532,12 @@ def test_heartbeat_merges_derived_exception_rerun_into_cloned_parent(store, tmp_
         "Traceback (most recent call last):\nValueError: boom\n",
         encoding="utf-8",
     )
+    unrelated_job_dir = original_jobs_dir / "unrelated-job"
+    _write_jobs_trial(unrelated_job_dir, "other__old", task_name="other")
+    (unrelated_job_dir / "config.json").write_text(
+        json.dumps({"job_name": unrelated_job_dir.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
     store.update_task_template_executor_config(
         str(run["template_id"]),
         {"combinedJobsDir": str(original_jobs_dir)},
@@ -548,10 +554,14 @@ def test_heartbeat_merges_derived_exception_rerun_into_cloned_parent(store, tmp_
     assert derived_run["parent_run_id"] == run["run_id"]
     assert cloned_parent["run_id"] == derived_run["run_id"]
     assert cloned_parent["batch_id"] != original_parent["batch_id"]
-    assert derived_jobs_dir == derived_jobs_dir_for_run(store=store, run=derived_run)
-    assert derived_jobs_dir != original_jobs_dir
+    assert derived_jobs_dir == original_jobs_dir
+    assert derived_jobs_dir != derived_jobs_dir_for_run(store=store, run=derived_run)
     assert original_ok_trial.exists()
     assert original_exc_trial.exists()
+    final_job_dir = derived_jobs_dir / sanitize_name(str(derived_run["display_name"]))
+    assert final_job_dir.name == f"{original_job_dir.name}-rerun-{derived_run['run_id']}"
+    assert (final_job_dir / "ok__old" / "result.json").exists()
+    assert (final_job_dir / "exc-a__old" / "result.json").exists()
 
     rerun_imported_dir = store.layout.controller_dir / "imported-jobs" / rerun_batch["batch_id"]
     rerun_result_trial = _write_jobs_trial(rerun_imported_dir, "exc-a__new", task_name="exc-a")
@@ -602,11 +612,11 @@ def test_heartbeat_merges_derived_exception_rerun_into_cloned_parent(store, tmp_
     assert store.get_run(derived_run["run_id"])["rerun_status"] == "succeeded"
     assert store.get_run_rerun_job(job["job_id"])["status"] == "succeeded"
     assert store.list_case_runs(rerun_batch["batch_id"]) == []
-    derived_merged_job = derived_jobs_dir / sanitize_name(str(derived_run["display_name"]))
-    assert (derived_merged_job / "config.json").exists()
-    assert (derived_merged_job / "ok__old" / "result.json").exists()
-    assert (derived_merged_job / "exc-a__new" / "result.json").exists()
-    assert not (derived_merged_job / "exc-a__old").exists()
+    assert (final_job_dir / "config.json").exists()
+    assert (final_job_dir / "ok__old" / "result.json").exists()
+    assert (final_job_dir / "exc-a__new" / "result.json").exists()
+    assert not (final_job_dir / "exc-a__old").exists()
+    assert not (final_job_dir / "other__old").exists()
     assert original_ok_trial.exists()
     assert original_exc_trial.exists()
     assert rerun_result_trial.exists()
