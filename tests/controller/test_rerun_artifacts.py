@@ -59,6 +59,30 @@ def test_copy_jobs_tree_rejects_same_source_and_target(tmp_path):
     assert (source / "merged" / "case-a__old" / "result.json").exists()
 
 
+def test_copy_jobs_tree_rejects_target_inside_source(tmp_path):
+    source = tmp_path / "jobs"
+    target = source / "nested-target"
+    _write_trial(source / "merged", "case-a__old")
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, target)
+
+    assert "must not overlap" in str(exc.value)
+    assert (source / "merged" / "case-a__old" / "result.json").exists()
+
+
+def test_copy_jobs_tree_rejects_source_inside_target(tmp_path):
+    target = tmp_path / "jobs"
+    source = target / "source"
+    _write_trial(source / "merged", "case-a__old")
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, target)
+
+    assert "must not overlap" in str(exc.value)
+    assert (source / "merged" / "case-a__old" / "result.json").exists()
+
+
 def test_copy_jobs_tree_rejects_non_directory_target(tmp_path):
     source = tmp_path / "source-jobs"
     target = tmp_path / "target-jobs"
@@ -70,6 +94,24 @@ def test_copy_jobs_tree_rejects_non_directory_target(tmp_path):
 
     assert "target jobs path exists but is not a directory" in str(exc.value)
     assert target.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_copy_jobs_tree_rejects_symlink_target(tmp_path):
+    source = tmp_path / "source-jobs"
+    link_target = tmp_path / "real-target"
+    target = tmp_path / "target-link"
+    _write_trial(source / "merged", "case-a__old")
+    link_target.mkdir()
+    try:
+        target.symlink_to(link_target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unsupported: {exc}")
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, target)
+
+    assert "target jobs path exists but is not a directory" in str(exc.value)
+    assert target.is_symlink()
 
 
 def test_delete_trials_for_cases_removes_only_selected_trials(tmp_path):

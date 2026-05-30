@@ -16,8 +16,23 @@ def derived_jobs_dir_for_run(*, store: "Store", run: dict[str, Any]) -> Path:
 def copy_jobs_tree(source: Path, target: Path) -> None:
     if not source.exists() or not source.is_dir():
         raise RuntimeError(f"source jobs directory not found: {source}")
-    if source.resolve() == target.resolve():
+    resolved_source = source.resolve()
+    resolved_target = target.resolve()
+    if resolved_source == resolved_target:
         raise RuntimeError(f"source and target jobs directories must differ: {source}")
+    try:
+        resolved_source.relative_to(resolved_target)
+        overlaps = True
+    except ValueError:
+        try:
+            resolved_target.relative_to(resolved_source)
+            overlaps = True
+        except ValueError:
+            overlaps = False
+    if overlaps:
+        raise RuntimeError(
+            f"source and target jobs directories must not overlap: {source} -> {target}"
+        )
     if target.exists() and (target.is_symlink() or not target.is_dir()):
         raise RuntimeError(f"target jobs path exists but is not a directory: {target}")
     if target.exists():
