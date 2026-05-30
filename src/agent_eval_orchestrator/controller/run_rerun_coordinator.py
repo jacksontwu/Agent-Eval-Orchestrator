@@ -89,24 +89,29 @@ class RunRerunCoordinator:
             target_run_id=str(derived_run["run_id"]),
         )
         job_id = new_id("rerun")
-        rerun_batches: dict[str, str] = {}
+        rerun_batches: dict[str, str | list[str]] = {}
         for worker_id, items in grouped.items():
-            case_ids = worker_shards[worker_id]
-            parent_batch_id = cloned_batch_ids[str(items[0]["parent_batch_id"])]
-            parent = self.store.get_batch(parent_batch_id)
-            batch_options = dict((parent or {}).get("batch_options") or {})
-            if rerun_concurrency is not None:
-                batch_options["concurrency"] = rerun_concurrency
-            batch = self.store.create_batch(
-                run_id=str(derived_run["run_id"]),
-                selected_case_ids=case_ids,
-                preferred_worker_id=worker_id,
-                batch_options=batch_options,
-                initial_status="pending_sync",
-                batch_kind="exception_rerun",
-                parent_batch_id=parent_batch_id,
-            )
-            rerun_batches[worker_id] = str(batch["batch_id"])
+            batches_for_worker: list[str] = []
+            by_parent: dict[str, list[str]] = {}
+            for item, case_id in zip(items, worker_shards[worker_id]):
+                by_parent.setdefault(str(item["parent_batch_id"]), []).append(case_id)
+            for original_parent_batch_id, case_ids in by_parent.items():
+                parent_batch_id = cloned_batch_ids[original_parent_batch_id]
+                parent = self.store.get_batch(parent_batch_id)
+                batch_options = dict((parent or {}).get("batch_options") or {})
+                if rerun_concurrency is not None:
+                    batch_options["concurrency"] = rerun_concurrency
+                batch = self.store.create_batch(
+                    run_id=str(derived_run["run_id"]),
+                    selected_case_ids=case_ids,
+                    preferred_worker_id=worker_id,
+                    batch_options=batch_options,
+                    initial_status="pending_sync",
+                    batch_kind="exception_rerun",
+                    parent_batch_id=parent_batch_id,
+                )
+                batches_for_worker.append(str(batch["batch_id"]))
+            rerun_batches[worker_id] = batches_for_worker[0] if len(batches_for_worker) == 1 else batches_for_worker
 
         self.store.create_run_rerun_job(
             job_id=job_id,

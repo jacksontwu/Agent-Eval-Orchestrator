@@ -211,3 +211,84 @@ def test_create_run_rerun_job_persists_selected_error_types(store):
     assert job["selected_error_types"] == ["TimeoutError", "OtherError"]
     fetched = store.get_run_rerun_job(job_id)
     assert fetched["selected_error_types"] == ["TimeoutError", "OtherError"]
+
+
+def test_finish_rerun_batch_handles_multiple_batches_per_worker(store):
+    template = store.create_task_template(
+        owner="default",
+        name="rerun-test",
+        dataset_ref="/tmp/dataset",
+        executor_kind="harbor-docker",
+        executor_config={},
+        model_profile_ref=None,
+        note="",
+    )
+    run = store.create_run(template_id=template["template_id"], display_name="rerun-run")
+    store.register_worker(
+        worker_id="worker-a",
+        display_name="worker-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={},
+    )
+    parent_a = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["case-a"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="succeeded",
+    )
+    parent_b = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["case-b"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="succeeded",
+    )
+    rerun_a = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["case-a"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="succeeded",
+        batch_kind="exception_rerun",
+        parent_batch_id=parent_a["batch_id"],
+    )
+    rerun_b = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["case-b"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="running",
+        batch_kind="exception_rerun",
+        parent_batch_id=parent_b["batch_id"],
+    )
+    job_id = new_id("rerun")
+    store.create_run_rerun_job(
+        job_id=job_id,
+        run_id=run["run_id"],
+        case_ids=["case-a", "case-b"],
+        worker_shards={"worker-a": ["case-a", "case-b"]},
+        rerun_batches={"worker-a": [rerun_a["batch_id"], rerun_b["batch_id"]]},
+    )
+    store.update_run_rerun_fields(
+        run_id=run["run_id"],
+        rerun_status="syncing",
+        rerun_job_id=job_id,
+    )
+
+    store.finish_rerun_batch_if_complete(rerun_batch_id=rerun_a["batch_id"])
+    assert store.get_run(run["run_id"])["rerun_status"] == "syncing"
+
+    store.update_batch_progress(
+        batch_id=rerun_b["batch_id"],
+        worker_id="worker-a",
+        status="succeeded",
+        current_step=None,
+        finished=True,
+    )
+    store.finish_rerun_batch_if_complete(rerun_batch_id=rerun_b["batch_id"])
+
+    assert store.get_run(run["run_id"])["rerun_status"] == "succeeded"
+    assert store.get_run_rerun_job(job_id)["status"] == "succeeded"

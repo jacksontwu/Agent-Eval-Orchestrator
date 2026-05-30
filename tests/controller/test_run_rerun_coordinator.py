@@ -118,6 +118,58 @@ def test_start_rerun_creates_derived_run_and_leaves_original_unchanged(store, tm
     assert rerun_batch["parent_batch_id"] != parent["batch_id"]
 
 
+def test_start_rerun_splits_same_worker_reruns_by_parent_batch(coordinator, store):
+    run, first_parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom-a"},
+            {"case_id": "ok-a", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    second_parent = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["exc-b", "ok-b"],
+        preferred_worker_id="worker-a",
+        batch_options={"source": "second"},
+    )
+    store.update_batch_progress(
+        batch_id=second_parent["batch_id"],
+        worker_id="worker-a",
+        status="succeeded",
+        current_step=None,
+        finished=True,
+        cases=[
+            {"caseId": "exc-b", "status": "errored", "errorText": "boom-b"},
+            {"caseId": "ok-b", "status": "succeeded", "score": 1.0},
+        ],
+    )
+
+    result = coordinator.start_rerun(run["run_id"])
+
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    assert job["run_id"] == result["runId"]
+    assert result["workerShards"] == {"worker-a": 2}
+    rerun_batch_ids = job["rerun_batches"]["worker-a"]
+    assert isinstance(rerun_batch_ids, list)
+    assert len(rerun_batch_ids) == 2
+
+    derived_primary = store.list_primary_batches_for_run(result["runId"])
+    cloned_parent_by_cases = {
+        tuple(batch["selected_case_ids"]): batch["batch_id"]
+        for batch in derived_primary
+    }
+    expected_parent_by_case = {
+        "exc-a": cloned_parent_by_cases[tuple(first_parent["selected_case_ids"])],
+        "exc-b": cloned_parent_by_cases[tuple(second_parent["selected_case_ids"])],
+    }
+    for batch_id in rerun_batch_ids:
+        rerun_batch = store.get_batch(batch_id)
+        assert rerun_batch["batch_kind"] == "exception_rerun"
+        assert len(rerun_batch["selected_case_ids"]) == 1
+        case_id = rerun_batch["selected_case_ids"][0]
+        assert rerun_batch["parent_batch_id"] == expected_parent_by_case[case_id]
+
+
 def test_start_rerun_rejects_no_exceptions(coordinator, store):
     run, _ = seed_finished_run_with_cases(
         store,

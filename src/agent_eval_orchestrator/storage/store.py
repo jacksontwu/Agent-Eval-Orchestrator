@@ -761,7 +761,12 @@ class Store:
         job = self.get_run_rerun_job(str(run["rerun_job_id"]))
         if not job:
             return
-        rerun_batch_ids = [str(batch_id) for batch_id in job["rerun_batches"].values()]
+        rerun_batch_ids: list[str] = []
+        for value in job["rerun_batches"].values():
+            if isinstance(value, list):
+                rerun_batch_ids.extend(str(batch_id) for batch_id in value)
+            else:
+                rerun_batch_ids.append(str(value))
         statuses = []
         for batch_id in rerun_batch_ids:
             item = self.get_batch(batch_id)
@@ -1570,7 +1575,7 @@ class Store:
         run_id: str,
         case_ids: list[str],
         worker_shards: dict[str, list[str]],
-        rerun_batches: dict[str, str],
+        rerun_batches: dict[str, str | list[str]],
         selected_error_types: list[str] | None = None,
     ) -> dict[str, Any]:
         now = now_iso()
