@@ -246,6 +246,8 @@ def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp
             },
         },
     )
+    original_template = store.get_task_template(run["template_id"])
+    original_run = store.get_run(run["run_id"])
     coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
 
     result = coordinator.start_rerun(
@@ -266,7 +268,10 @@ def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp
     )
 
     assert result["exceptionCount"] == 1
-    template = store.get_task_template(run["template_id"])
+    assert store.get_task_template(run["template_id"]) == original_template
+    assert store.get_run(run["run_id"]) == original_run
+    derived_run = store.get_run(result["runId"])
+    template = store.get_task_template(derived_run["template_id"])
     assert template["dataset_ref"] == assets["datasetPath"]
     executor_config = template["executor_config"]
     assert executor_config["nConcurrent"] == 3
@@ -275,14 +280,15 @@ def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp
     assert executor_config["verifierTimeoutMultiplier"] == 2.4
     assert executor_config["environmentBuildTimeoutMultiplier"] == 1.8
     assert executor_config["combinedJobsDir"] == assets["jobsDir"]
-    updated_run = store.get_run(run["run_id"])
-    manifest = updated_run["sync_manifest"]
+    manifest = derived_run["sync_manifest"]
     assert manifest["datasetPath"] == assets["datasetPath"]
     assert manifest["bitfunCliPath"] == assets["bitfunCliPath"]
     assert manifest["bitfunConfigDir"] == assets["bitfunConfigDir"]
-    assert manifest["workers"]["worker-a"]["targetRoot"] == previous_target
+    assert manifest["workers"]["worker-a"]["targetRoot"] == str(tmp_path / "shared" / "sync" / result["runId"])
+    assert manifest["workers"]["worker-a"]["targetRoot"] != previous_target
     assert manifest["workers"]["worker-a"]["transport"] == "local"
     job = store.get_run_rerun_job(result["rerunJobId"])
+    assert job["run_id"] == result["runId"]
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
     assert rerun_batch["batch_options"]["concurrency"] == 3
 
@@ -524,6 +530,8 @@ def test_start_rerun_dataset_change_with_empty_executor_config_updates_template_
             },
         },
     )
+    original_template = store.get_task_template(run["template_id"])
+    original_run = store.get_run(run["run_id"])
     coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
     monkeypatch.setattr(
         rerun_coordinator_module,
@@ -531,7 +539,7 @@ def test_start_rerun_dataset_change_with_empty_executor_config_updates_template_
         ["executorConfig", "datasetPath", "bitfunCliPath", "bitfunConfigDir", "jobsDir"],
     )
 
-    coordinator.start_rerun(
+    result = coordinator.start_rerun(
         run["run_id"],
         config={
             "datasetPath": assets["datasetPath"],
@@ -539,13 +547,19 @@ def test_start_rerun_dataset_change_with_empty_executor_config_updates_template_
         },
     )
 
-    template = store.get_task_template(run["template_id"])
+    assert store.get_task_template(run["template_id"]) == original_template
+    assert store.get_run(run["run_id"]) == original_run
+    derived_run = store.get_run(result["runId"])
+    template = store.get_task_template(derived_run["template_id"])
     assert template["dataset_ref"] == assets["datasetPath"]
-    updated_run = store.get_run(run["run_id"])
-    manifest = updated_run["sync_manifest"]
+    manifest = derived_run["sync_manifest"]
     assert manifest["datasetPath"] == assets["datasetPath"]
     assert manifest["bitfunCliPath"] == assets["bitfunCliPath"]
     assert manifest["bitfunConfigDir"] == assets["bitfunConfigDir"]
+    assert manifest["workers"]["worker-a"]["targetRoot"] == str(tmp_path / "shared" / "sync" / result["runId"])
+    assert manifest["workers"]["worker-a"]["targetRoot"] != previous_target
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    assert job["run_id"] == result["runId"]
 
 
 def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path):
@@ -599,10 +613,11 @@ def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path)
             },
         },
     )
+    original_template = store.get_task_template(run["template_id"])
     assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
     coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
 
-    coordinator.start_rerun(
+    result = coordinator.start_rerun(
         run["run_id"],
         config={
             "datasetPath": assets["datasetPath"],
@@ -613,7 +628,11 @@ def test_start_rerun_config_replaces_stale_executor_worker_maps(store, tmp_path)
         },
     )
 
-    executor_config = store.get_task_template(run["template_id"])["executor_config"]
+    assert store.get_task_template(run["template_id"]) == original_template
+    derived_run = store.get_run(result["runId"])
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    assert job["run_id"] == result["runId"]
+    executor_config = store.get_task_template(derived_run["template_id"])["executor_config"]
     for key in (
         "uvBinaryByWorker",
         "harborRepoPathByWorker",

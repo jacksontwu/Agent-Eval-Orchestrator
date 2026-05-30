@@ -79,6 +79,7 @@ class RunRerunCoordinator:
             rerun_concurrency = self._apply_config(
                 run=derived_run,
                 config=dict(asset_config or {}),
+                fallback_manifest=existing_manifest,
                 worker_shards=worker_shards,
                 all_case_ids=all_case_ids,
             )
@@ -224,6 +225,7 @@ class RunRerunCoordinator:
         *,
         run: dict[str, Any],
         config: dict[str, Any],
+        fallback_manifest: dict[str, Any] | None = None,
         worker_shards: dict[str, list[str]],
         all_case_ids: list[str],
     ) -> int:
@@ -232,6 +234,7 @@ class RunRerunCoordinator:
             raise RerunValidationError(404, "task template not found")
         existing_executor_config = dict(template.get("executor_config") or {})
         existing_manifest = dict(run.get("sync_manifest") or {})
+        fallback_manifest = dict(fallback_manifest or {})
         controller_root = (
             self.asset_syncer.controller_shared_root
             if self.asset_syncer is not None
@@ -242,15 +245,26 @@ class RunRerunCoordinator:
             str(
                 config.get("datasetPath")
                 or existing_manifest.get("datasetPath")
+                or fallback_manifest.get("datasetPath")
                 or template.get("dataset_ref")
                 or ""
             )
         ).expanduser()
         bitfun_cli_path = Path(
-            str(config.get("bitfunCliPath") or existing_manifest.get("bitfunCliPath") or "")
+            str(
+                config.get("bitfunCliPath")
+                or existing_manifest.get("bitfunCliPath")
+                or fallback_manifest.get("bitfunCliPath")
+                or ""
+            )
         ).expanduser()
         bitfun_config_dir = Path(
-            str(config.get("bitfunConfigDir") or existing_manifest.get("bitfunConfigDir") or "")
+            str(
+                config.get("bitfunConfigDir")
+                or existing_manifest.get("bitfunConfigDir")
+                or fallback_manifest.get("bitfunConfigDir")
+                or ""
+            )
         ).expanduser()
         jobs_dir = str(
             config.get("jobsDir")
