@@ -764,6 +764,24 @@ INDEX_HTML = """<!doctype html>
       return String(raw).trim();
     }
 
+    function formatExceptionDisplayText(detail) {
+      const display = detail.exceptionDisplay || {};
+      const records = display.trialRecordCount ?? detail.exceptionCount ?? 0;
+      const parts = ["剩余 exception 记录（case_runs 行）: " + records];
+      if (display.uniqueCaseCount != null) {
+        parts.push("唯一 case: " + display.uniqueCaseCount);
+      }
+      if (display.harborMergedErroredTrials != null) {
+        const job = display.harborMergedJobName ? " (" + display.harborMergedJobName + ")" : "";
+        parts.push("Harbor 合并 job errors" + job + ": " + display.harborMergedErroredTrials);
+      }
+      return parts.join(" · ");
+    }
+
+    function formatExceptionDisplayHint(detail) {
+      return "exceptionCount 按 store 中 errored 的 trial 行计数；Harbor Viewer 的 errors 来自合并 job 的 n_errored_trials，二者口径不同。";
+    }
+
     function syncStatusBadge(syncStatus) {
       if (!syncStatus) return "";
       const map = {
@@ -1150,7 +1168,8 @@ INDEX_HTML = """<!doctype html>
       if (status === "idle") return "";
       return '<div class="panel" style="margin-bottom:16px"><div class="panel-body detail">' +
         '<div class="item-title"><strong>Exception 重跑</strong>' + rerunStatusBadge(status) + '</div>' +
-        '<div class="subtle">remaining exceptions: ' + esc(detail.exceptionCount ?? 0) + '</div>' +
+        '<div class="subtle">' + esc(formatExceptionDisplayText(detail)) + '</div>' +
+        '<div class="subtle" style="margin-top:4px">' + esc(formatExceptionDisplayHint(detail)) + '</div>' +
         (state.rerunJobDetail?.errorText ? '<pre class="error-text">' + esc(state.rerunJobDetail.errorText) + '</pre>' : '') +
       '</div></div>';
     }
@@ -1193,12 +1212,18 @@ INDEX_HTML = """<!doctype html>
         (template ? template.dataset_ref : "") +
         (run.sync_status ? " · sync: " + run.sync_status : "");
 
+      const exceptionLine = formatExceptionDisplayText(detail);
       root.innerHTML =
         '<div class="detail-grid">' +
           '<div class="stat"><div class="subtle">Workers</div><strong>' + groups.length + '</strong></div>' +
           '<div class="stat"><div class="subtle">Run ID</div><strong><code>' + esc(run.run_id) + '</code></strong></div>' +
           '<div class="stat"><div class="subtle">Executor</div><strong><code>' + esc(template.executor_kind) + '</code></strong></div>' +
         '</div>' +
+        (detail.exceptionCount ? (
+          '<div class="subtle" style="margin-bottom:12px" title="' + esc(formatExceptionDisplayHint(detail)) + '">' +
+            esc(exceptionLine) +
+          '</div>'
+        ) : '') +
         '<div class="actions" style="margin-bottom:16px">' +
           '<button class="primary" type="button" id="openGlobalViewerBtn">打开 Harbor Viewer</button>' +
           '<button class="secondary" type="button" id="rerunExceptionsBtn">重跑 Exception</button>' +
@@ -1592,7 +1617,11 @@ INDEX_HTML = """<!doctype html>
       body.innerHTML = renderRerunTypeSelectionHtml(modalState) +
         '<div class="detail-grid" style="margin-bottom:16px">' +
           '<div class="stat"><div class="subtle">Task</div><strong class="subtle">' + esc(detail.run?.display_name || "-") + '</strong></div>' +
-          '<div class="stat"><div class="subtle">Exception cases</div><strong>' + esc(detail.exceptionCount || 0) + '</strong></div>' +
+          '<div class="stat"><div class="subtle">Exception 记录（行）</div><strong>' + esc((detail.exceptionDisplay && detail.exceptionDisplay.trialRecordCount) || detail.exceptionCount || 0) + '</strong></div>' +
+          '<div class="stat"><div class="subtle">唯一 case</div><strong>' + esc(detail.exceptionDisplay && detail.exceptionDisplay.uniqueCaseCount != null ? detail.exceptionDisplay.uniqueCaseCount : "-") + '</strong></div>' +
+          ((detail.exceptionDisplay && detail.exceptionDisplay.harborMergedErroredTrials != null)
+            ? '<div class="stat"><div class="subtle">Harbor 合并 errors</div><strong>' + esc(detail.exceptionDisplay.harborMergedErroredTrials) + '</strong></div>'
+            : '') +
           '<div class="stat"><div class="subtle">Workers</div><strong>' + esc(rerunInvolvedWorkerCount(detail)) + '</strong></div>' +
         '</div>' +
         (modalState.error ? '<div class="empty" style="color:var(--bad);padding:10px 0">' + esc(modalState.error) + '</div>' : '') +

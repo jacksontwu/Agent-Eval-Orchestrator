@@ -1,3 +1,5 @@
+import json
+
 from agent_eval_orchestrator.storage.store import Store
 from conftest import seed_finished_run_with_cases
 
@@ -86,3 +88,51 @@ def test_eval_task_detail_includes_exception_summary(store):
         "OtherError",
     }
     assert detail["exceptionCount"] == 2
+    assert detail["exceptionDisplay"]["trialRecordCount"] == 2
+    assert detail["exceptionDisplay"]["uniqueCaseCount"] == 2
+
+
+def test_summarize_exception_display_for_run(store):
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "a", "metrics": {"errorType": "TimeoutError"}},
+            {"case_id": "exc-a", "status": "errored", "error_text": "a2", "metrics": {"errorType": "TimeoutError"}},
+            {"case_id": "exc-b", "status": "errored", "error_text": "b", "metrics": {"errorType": "OtherError"}},
+        ],
+    )
+    display = store.summarize_exception_display_for_run(run["run_id"])
+    assert display["trialRecordCount"] == 3
+    assert display["uniqueCaseCount"] == 2
+
+
+def test_eval_task_detail_includes_harbor_merged_stats(store, tmp_path):
+    from agent_eval_orchestrator.core.ids import sanitize_name
+
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "a", "metrics": {"errorType": "TimeoutError"}},
+        ],
+    )
+    run_row = store.get_run(run["run_id"])
+    job_name = sanitize_name(str(run_row["display_name"]))
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / job_name
+    job_dir.mkdir(parents=True)
+    (job_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "n_total_trials": 10,
+                "stats": {"n_errored_trials": 4},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.update_task_template_executor_config(
+        str(run_row["template_id"]),
+        {"combinedJobsDir": str(jobs_dir)},
+    )
+    detail = store.get_eval_task_detail(run["run_id"])
+    assert detail["exceptionDisplay"]["harborMergedErroredTrials"] == 4
+    assert detail["exceptionDisplay"]["harborMergedJobName"] == job_name

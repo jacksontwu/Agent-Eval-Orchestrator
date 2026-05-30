@@ -529,6 +529,50 @@ class Store:
         total = sum(entry["count"] for entry in by_type)
         return {"total": total, "byType": by_type}
 
+    def read_harbor_merged_job_stats(
+        self,
+        run_id: str,
+        merged_jobs_dir: Path,
+    ) -> dict[str, Any] | None:
+        run = self.get_run(run_id)
+        if not run:
+            return None
+        job_name = sanitize_name(str(run["display_name"]))
+        result_path = merged_jobs_dir.expanduser().resolve() / job_name / "result.json"
+        if not result_path.exists():
+            return None
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+        return {
+            "jobName": job_name,
+            "erroredTrials": int(stats.get("n_errored_trials") or 0),
+            "totalTrials": int(payload.get("n_total_trials") or 0),
+        }
+
+    def summarize_exception_display_for_run(
+        self,
+        run_id: str,
+        *,
+        merged_jobs_dir: Path | None = None,
+    ) -> dict[str, Any]:
+        items = self.list_exception_cases_for_run(run_id)
+        display: dict[str, Any] = {
+            "trialRecordCount": len(items),
+            "uniqueCaseCount": len({str(item["case_id"]) for item in items}),
+        }
+        if merged_jobs_dir is not None:
+            merged = self.read_harbor_merged_job_stats(run_id, merged_jobs_dir)
+            if merged is not None:
+                display["harborMergedJobName"] = merged["jobName"]
+                display["harborMergedErroredTrials"] = merged["erroredTrials"]
+                display["harborMergedTotalTrials"] = merged["totalTrials"]
+        return display
+
     def filter_exception_cases_by_types(
         self,
         run_id: str,
@@ -2042,6 +2086,15 @@ class Store:
         )
         exception_count = len(self.list_exception_cases_for_run(run_id))
         exception_summary = self.summarize_exception_types_for_run(run_id)
+        merged_jobs_dir: Path | None = None
+        if template:
+            raw_jobs_dir = str((template.get("executor_config") or {}).get("combinedJobsDir") or "").strip()
+            if raw_jobs_dir:
+                merged_jobs_dir = Path(raw_jobs_dir)
+        exception_display = self.summarize_exception_display_for_run(
+            run_id,
+            merged_jobs_dir=merged_jobs_dir,
+        )
         rerun_status = str(run.get("rerun_status") or "idle")
         can_rerun = (
             self.is_run_primary_terminal(run_id)
@@ -2055,6 +2108,7 @@ class Store:
             "workerGroups": worker_group_list,
             "canRerunExceptions": can_rerun,
             "exceptionCount": exception_count,
+            "exceptionDisplay": exception_display,
             "exceptionSummary": exception_summary,
             "rerunStatus": rerun_status,
             "rerunJobId": run.get("rerun_job_id"),
