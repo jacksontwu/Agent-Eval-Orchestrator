@@ -1,5 +1,8 @@
 import json
 import os
+import base64
+import io
+import tarfile
 from pathlib import Path
 from http.client import HTTPConnection
 from threading import Thread
@@ -80,6 +83,13 @@ def _write_jobs_trial(job_dir: Path, trial_name: str, *, task_name: str) -> Path
         encoding="utf-8",
     )
     return trial_dir
+
+
+def _tar_dir_base64(path: Path) -> str:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        tar.add(path, arcname=path.name)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def test_job_sources_for_derived_run_uses_derived_sources_not_original_job_dir(store, tmp_path):
@@ -651,6 +661,75 @@ def test_heartbeat_merges_derived_exception_rerun_into_final_rerun_job(store, tm
     assert original_ok_trial.exists()
     assert original_exc_trial.exists()
     assert rerun_result_trial.exists()
+    server.shutdown()
+
+
+def test_job_archive_for_derived_exception_rerun_does_not_rebuild_from_sibling_jobs(store, tmp_path):
+    run, _original_parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+            {"case_id": "exc-a", "status": "errored", "error_text": "ValueError: boom"},
+        ],
+    )
+    original_jobs_dir = tmp_path / "original-harbor" / "jobs"
+    original_job_dir = original_jobs_dir / sanitize_name(str(run["display_name"]))
+    (original_job_dir / "config.json").parent.mkdir(parents=True)
+    (original_job_dir / "config.json").write_text(
+        json.dumps({"job_name": original_job_dir.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
+    _write_jobs_trial(original_job_dir, "ok__old", task_name="ok")
+    original_exc_trial = _write_jobs_trial(original_job_dir, "exc-a__old", task_name="exc-a")
+    (original_exc_trial / "exception.txt").write_text(
+        "Traceback (most recent call last):\nValueError: boom\n",
+        encoding="utf-8",
+    )
+    sibling_job_dir = original_jobs_dir / "sibling-job"
+    _write_jobs_trial(sibling_job_dir, "other__old", task_name="other")
+    (sibling_job_dir / "config.json").write_text(
+        json.dumps({"job_name": sibling_job_dir.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
+    store.update_task_template_executor_config(
+        str(run["template_id"]),
+        {"combinedJobsDir": str(original_jobs_dir)},
+    )
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(run["run_id"])
+    derived_run = store.get_run(result["runId"])
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    final_job_dir = original_jobs_dir / sanitize_name(str(derived_run["display_name"]))
+
+    archive_root = tmp_path / "archive"
+    archived_batch_dir = archive_root / rerun_batch["batch_id"]
+    _write_jobs_trial(archived_batch_dir, "exc-a__new", task_name="exc-a")
+
+    server = start_test_server(store, tmp_path, 9902)
+    conn = HTTPConnection("127.0.0.1", 9902)
+    body = json.dumps(
+        {
+            "batchId": rerun_batch["batch_id"],
+            "jobsDir": str(original_jobs_dir),
+            "archiveBase64": _tar_dir_base64(archived_batch_dir),
+        }
+    )
+    with patch("agent_eval_orchestrator.normalizers.harbor_job_merge.finalize_job_result_with_harbor"):
+        conn.request(
+            "POST",
+            "/api/workers/job-archive",
+            body=body,
+            headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+        )
+        resp = conn.getresponse()
+
+    assert resp.status == 200
+    assert (final_job_dir / "ok__old" / "result.json").exists()
+    assert (final_job_dir / "exc-a__new" / "result.json").exists()
+    assert not (final_job_dir / "exc-a__old").exists()
+    assert not (final_job_dir / "other__old").exists()
+    trial_dirs = [child for child in final_job_dir.iterdir() if child.is_dir()]
+    assert sorted(child.name for child in trial_dirs) == ["exc-a__new", "ok__old"]
     server.shutdown()
 
 

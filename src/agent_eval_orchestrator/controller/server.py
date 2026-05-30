@@ -912,21 +912,23 @@ class Handler(BaseHTTPRequestHandler):
                 _safe_extract_tar(archive, imported_root)
                 batch = self.store.get_batch(batch_id)
                 if batch:
-                    if str(batch.get("batch_kind") or "") == "exception_rerun":
+                    is_exception_rerun = str(batch.get("batch_kind") or "") == "exception_rerun"
+                    if is_exception_rerun:
                         _apply_exception_rerun_merge(
                             store=self.store,
                             batch_id=batch_id,
                             jobs_dir=jobs_dir,
                         )
-                    try:
-                        _rebuild_merged_job_for_run(
-                            store=self.store,
-                            run_id=str(batch["run_id"]),
-                            jobs_dir=jobs_dir,
-                        )
-                    except RuntimeError as exc:
-                        _json_response(self, {"error": str(exc)}, 500)
-                        return
+                    else:
+                        try:
+                            _rebuild_merged_job_for_run(
+                                store=self.store,
+                                run_id=str(batch["run_id"]),
+                                jobs_dir=jobs_dir,
+                            )
+                        except RuntimeError as exc:
+                            _json_response(self, {"error": str(exc)}, 500)
+                            return
                 _json_response(self, {"ok": True, "batchId": batch_id, "jobsDir": str(jobs_dir)})
             except KeyError as exc:
                 _json_response(self, {"error": f"missing field: {exc}"}, 400)
