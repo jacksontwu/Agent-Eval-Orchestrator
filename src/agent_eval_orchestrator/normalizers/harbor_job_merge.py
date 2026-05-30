@@ -58,6 +58,7 @@ def refresh_job_result(*, job_dir: Path, harbor_repo: Path | None = None) -> Non
     if not _iter_trial_dirs(job_dir):
         raise RuntimeError("no Harbor trial results found while refreshing job")
     finalize_job_result_with_harbor(job_dir=job_dir, harbor_repo=harbor_repo)
+    normalize_job_result_file(job_dir / "result.json")
 
 
 def resolve_controller_harbor_repo() -> Path:

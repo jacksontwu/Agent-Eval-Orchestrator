@@ -10,7 +10,7 @@ from agent_eval_orchestrator.normalizers.harbor_timestamps import (
     normalize_jobs_dir,
     to_harbor_naive_utc_iso,
 )
-from agent_eval_orchestrator.normalizers.harbor_job_merge import write_merged_job
+from agent_eval_orchestrator.normalizers.harbor_job_merge import refresh_job_result, write_merged_job
 
 
 @pytest.mark.unit
@@ -107,3 +107,40 @@ def test_write_merged_job_uses_naive_utc_timestamps(tmp_path: Path, monkeypatch)
     )
     assert "Z" not in result["started_at"]
     assert "+" not in result["started_at"]
+
+
+@pytest.mark.unit
+def test_refresh_job_result_uses_naive_utc_timestamps(tmp_path: Path, monkeypatch) -> None:
+    from agent_eval_orchestrator.normalizers import harbor_job_merge
+
+    def _fake_finalize(*, job_dir: Path, harbor_repo=None) -> None:
+        (job_dir / "result.json").write_text(
+            json.dumps(
+                {
+                    "id": "job-1",
+                    "started_at": "2026-05-25T08:56:31.915412Z",
+                    "updated_at": "2026-05-25T09:00:00.915412Z",
+                    "finished_at": "2026-05-25T09:00:00.915412Z",
+                    "n_total_trials": 1,
+                    "stats": {"n_completed_trials": 1},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(harbor_job_merge, "finalize_job_result_with_harbor", _fake_finalize)
+
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "trial-a"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps({"trial_name": "trial-a"}),
+        encoding="utf-8",
+    )
+
+    refresh_job_result(job_dir=job_dir)
+
+    result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+    assert result["started_at"] == "2026-05-25T08:56:31.915412"
+    assert result["updated_at"] == "2026-05-25T09:00:00.915412"
+    assert result["finished_at"] == "2026-05-25T09:00:00.915412"
