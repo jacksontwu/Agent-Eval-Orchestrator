@@ -896,8 +896,19 @@ INDEX_HTML = """<!doctype html>
         .replaceAll('"', "&quot;");
     }
 
+    const queryToken = new URLSearchParams(window.location.search).get("token") || "";
+    if (queryToken) {
+      document.cookie = "aeo_token=" + encodeURIComponent(queryToken) + "; Path=/; SameSite=Lax";
+    }
+
     async function api(path, options) {
-      const res = await fetch(path, options);
+      const requestOptions = Object.assign({}, options || {});
+      const headers = new Headers(requestOptions.headers || {});
+      if (queryToken && !headers.has("X-AEO-Token")) {
+        headers.set("X-AEO-Token", queryToken);
+      }
+      requestOptions.headers = headers;
+      const res = await fetch(path, requestOptions);
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || ("HTTP " + res.status));
