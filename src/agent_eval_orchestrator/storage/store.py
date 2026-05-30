@@ -2287,16 +2287,20 @@ class Store:
                     "statusCounts": {"queued": 0, "running": 0, "succeeded": 0, "failed": 0, "stopped": 0},
                 },
             )
-            group["batches"].append(batch)
+            group["batches"].append(self._task_detail_batch_summary(batch, include_options=False))
             status = str(batch["status"])
             if status in group["statusCounts"]:
                 group["statusCounts"][status] += 1
             actual_cases = self.list_case_runs(str(batch["batch_id"]))
             unmatched_actual = list(actual_cases)
             for case in actual_cases:
+                case_item = dict(case)
+                case_item["artifact_index"] = self._task_detail_artifact_summary(
+                    case_item.get("artifact_index") or {}
+                )
                 group["cases"].append(
                     {
-                        **case,
+                        **case_item,
                         "batchId": batch["batch_id"],
                         "batchStatus": batch["status"],
                         "runId": run["run_id"],
@@ -2383,7 +2387,10 @@ class Store:
         return {
             "run": run,
             "template": template,
-            "batches": batches,
+            "batches": [
+                self._task_detail_batch_summary(batch, include_options=True)
+                for batch in batches
+            ],
             "workerGroups": worker_group_list,
             "parentRunId": parent_run_id,
             "isDerivedRun": bool(parent_run_id),
@@ -2396,6 +2403,29 @@ class Store:
             "rerunStatus": rerun_status,
             "rerunJobId": run.get("rerun_job_id"),
         }
+
+    @staticmethod
+    def _task_detail_artifact_summary(artifact_index: dict[str, Any]) -> dict[str, Any]:
+        allowed = ("trialDir", "resultPath", "logPath", "agentDir", "verifierDir")
+        return {
+            key: artifact_index[key]
+            for key in allowed
+            if artifact_index.get(key)
+        }
+
+    @staticmethod
+    def _task_detail_batch_summary(batch: dict[str, Any], *, include_options: bool) -> dict[str, Any]:
+        summary = {
+            "batch_id": batch["batch_id"],
+            "status": batch["status"],
+            "batch_kind": batch.get("batch_kind"),
+            "parent_batch_id": batch.get("parent_batch_id"),
+            "preferred_worker_id": batch.get("preferred_worker_id"),
+            "assigned_worker_id": batch.get("assigned_worker_id"),
+        }
+        if include_options:
+            summary["batch_options"] = batch.get("batch_options") or {}
+        return summary
 
     def list_batch_summaries(self) -> list[dict[str, Any]]:
         templates = {item["template_id"]: item for item in self.list_task_templates()}

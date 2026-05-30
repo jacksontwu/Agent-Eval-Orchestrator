@@ -39,6 +39,52 @@ def test_eval_task_detail_dedupes_long_selected_case_ids(store):
     assert worker_cases[0]["status"] == "errored"
 
 
+def test_eval_task_detail_returns_slim_worker_group_artifacts(store):
+    run, batch = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": "case-a",
+                "status": "succeeded",
+                "score": 1.0,
+                "artifact_index": {
+                    "trialDir": "/tmp/jobs/batch/case-a__old",
+                    "resultPath": "/tmp/jobs/batch/case-a__old/result.json",
+                    "logPath": "/tmp/jobs/batch/case-a__old/trial.log",
+                    "agentDir": "/tmp/jobs/batch/case-a__old/agent",
+                    "verifierDir": "/tmp/jobs/batch/case-a__old/verifier",
+                    "largeUnusedField": "x" * 10_000,
+                },
+            }
+        ],
+    )
+
+    detail = store.get_eval_task_detail(run["run_id"])
+    group = detail["workerGroups"][0]
+    case = group["cases"][0]
+    group_batch = group["batches"][0]
+    top_level_batch = next(item for item in detail["batches"] if item["batch_id"] == batch["batch_id"])
+
+    assert case["artifact_index"] == {
+        "trialDir": "/tmp/jobs/batch/case-a__old",
+        "resultPath": "/tmp/jobs/batch/case-a__old/result.json",
+        "logPath": "/tmp/jobs/batch/case-a__old/trial.log",
+        "agentDir": "/tmp/jobs/batch/case-a__old/agent",
+        "verifierDir": "/tmp/jobs/batch/case-a__old/verifier",
+    }
+    assert "largeUnusedField" not in json.dumps(group, ensure_ascii=False)
+    assert group_batch == {
+        "batch_id": batch["batch_id"],
+        "status": "succeeded",
+        "batch_kind": "primary",
+        "parent_batch_id": None,
+        "preferred_worker_id": "worker-a",
+        "assigned_worker_id": None,
+    }
+    assert "selected_case_ids" not in top_level_batch
+    assert "artifact_index" not in top_level_batch
+
+
 def test_case_covers_selected_matches_prefix_and_exact_ids(store):
     actual_case = {
         "case_id": "instance_tutao__tutanota-fb32e5f",
