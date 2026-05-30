@@ -5,6 +5,7 @@ from threading import Thread
 from unittest.mock import patch
 
 from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
+from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator
 from agent_eval_orchestrator.controller.server import Handler, ThreadedServer
 from conftest import seed_finished_run_with_cases
@@ -150,7 +151,10 @@ def test_post_rerun_exceptions_accepts_config_body(store, tmp_path):
     assert template["dataset_ref"] == assets["datasetPath"]
     executor_config = template["executor_config"]
     assert executor_config["nConcurrent"] == 2
-    assert executor_config["combinedJobsDir"] == assets["jobsDir"]
+    assert executor_config["combinedJobsDir"] == str(
+        derived_jobs_dir_for_run(store=store, run=derived_run)
+    )
+    assert executor_config["combinedJobsDir"] != assets["jobsDir"]
     updated_run = store.get_run(run["run_id"])
     assert updated_run["sync_manifest"]["datasetPath"] == "/tmp/old-dataset"
     manifest = derived_run["sync_manifest"]

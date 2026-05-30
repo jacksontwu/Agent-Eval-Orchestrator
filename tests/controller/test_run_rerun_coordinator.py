@@ -531,8 +531,6 @@ def test_start_rerun_rejects_missing_local_worker_shared_root_before_deriving_ru
 
 
 def test_start_rerun_resolves_truncated_case_ids_to_dataset_dirs(store, tmp_path):
-    import json
-
     long_selected = (
         "instance_tutao__tutanota-fb32e5f9d9fc152a00144d56dd0af01760a2d4dc-"
         "vc4e41fd0029957297843cb9dec4a25c7c756f029"
@@ -576,6 +574,99 @@ def test_start_rerun_resolves_truncated_case_ids_to_dataset_dirs(store, tmp_path
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
     assert rerun_batch["selected_case_ids"] == [long_selected]
     assert job["worker_shards"]["worker-a"] == [long_selected]
+
+
+def test_start_rerun_prunes_copied_short_id_trial_when_case_id_resolves(store, tmp_path):
+    long_selected = (
+        "instance_tutao__tutanota-fb32e5f9d9fc152a00144d56dd0af01760a2d4dc-"
+        "vc4e41fd0029957297843cb9dec4a25c7c756f029"
+    )
+    short_case_id = "instance_tutao__tutanota-fb32e5f"
+    run, parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": short_case_id,
+                "status": "errored",
+                "error_text": "boom",
+                "artifact_index": {
+                    "trialDir": f"/tmp/jobs/batch/{short_case_id}__XsXcKQq",
+                },
+            },
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE batches SET selected_case_ids_json = ? WHERE batch_id = ?",
+            (json.dumps([long_selected, "ok"], ensure_ascii=False), parent["batch_id"]),
+        )
+        conn.commit()
+    _make_worker_local(store, tmp_path)
+    assets = _prepare_rerun_assets(tmp_path, [long_selected])
+    original_jobs_dir = tmp_path / "original-harbor" / "jobs"
+    original_job = original_jobs_dir / "merged-job"
+    short_trial = _write_jobs_trial(
+        original_job,
+        f"{short_case_id}__old",
+        task_name=short_case_id,
+    )
+    ok_trial = _write_jobs_trial(original_job, "ok__old", task_name="ok")
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {"combinedJobsDir": str(original_jobs_dir)},
+    )
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    result = coordinator.start_rerun(
+        run["run_id"],
+        config={
+            "datasetPath": assets["datasetPath"],
+            "bitfunCliPath": assets["bitfunCliPath"],
+            "bitfunConfigDir": assets["bitfunConfigDir"],
+            "jobsDir": assets["jobsDir"],
+            "executorConfig": {"nConcurrent": 2},
+        },
+    )
+
+    assert short_trial.exists()
+    assert ok_trial.exists()
+    derived_run = store.get_run(result["runId"])
+    derived_jobs_dir = derived_jobs_dir_for_run(store=store, run=derived_run)
+    assert not (derived_jobs_dir / "merged-job" / f"{short_case_id}__old").exists()
+    assert (derived_jobs_dir / "merged-job" / "ok__old" / "result.json").exists()
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["selected_case_ids"] == [long_selected]
+
+
+def test_start_rerun_persists_job_error_when_source_jobs_copy_fails(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    missing_jobs_dir = tmp_path / "missing-harbor" / "jobs"
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {"combinedJobsDir": str(missing_jobs_dir)},
+    )
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    with pytest.raises(RuntimeError) as exc:
+        coordinator.start_rerun(run["run_id"])
+
+    assert "source jobs directory not found" in str(exc.value)
+    derived_runs = _derived_runs_for_parent(store, run["run_id"])
+    assert len(derived_runs) == 1
+    failed_run = store.get_run(derived_runs[0]["run_id"])
+    assert failed_run["rerun_status"] == "failed"
+    assert failed_run["rerun_job_id"]
+    job = store.get_run_rerun_job(failed_run["rerun_job_id"])
+    assert job is not None
+    assert job["run_id"] == failed_run["run_id"]
+    assert job["status"] == "failed"
+    assert job["rerun_batches"] == {}
+    assert "source jobs directory not found" in job["error_text"]
 
 
 def test_start_rerun_rejects_malformed_executor_config_before_job_creation(store, tmp_path):

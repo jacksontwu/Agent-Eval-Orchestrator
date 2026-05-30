@@ -70,6 +70,12 @@ class RunRerunCoordinator:
             for case_ids in worker_shards.values()
             for case_id in case_ids
         ]
+        original_case_ids = [
+            str(item["case_id"])
+            for items in grouped.values()
+            for item in items
+        ]
+        prune_case_ids = list(dict.fromkeys([*all_case_ids, *original_case_ids]))
         asset_config = self._filter_config_for_assets(dict(config or {}))
         config_supplied = self._has_applicable_config(asset_config)
         if config_supplied:
@@ -91,6 +97,19 @@ class RunRerunCoordinator:
         )
         job_id = new_id("rerun")
         try:
+            self.store.create_run_rerun_job(
+                job_id=job_id,
+                run_id=str(derived_run["run_id"]),
+                case_ids=all_case_ids,
+                worker_shards=worker_shards,
+                rerun_batches={},
+                selected_error_types=selected_error_types,
+            )
+            self.store.update_run_rerun_fields(
+                run_id=str(derived_run["run_id"]),
+                rerun_status="syncing",
+                rerun_job_id=job_id,
+            )
             rerun_concurrency: int | None = None
             if config_supplied:
                 rerun_concurrency = self._apply_config(
@@ -105,7 +124,7 @@ class RunRerunCoordinator:
             self._copy_and_prune_source_jobs(
                 source_template=source_template,
                 derived_run=derived_run,
-                case_ids=all_case_ids,
+                case_ids=prune_case_ids,
             )
 
             cloned_batch_ids = self.store.clone_primary_batches_to_run(
@@ -138,18 +157,9 @@ class RunRerunCoordinator:
                     batches_for_worker[0] if len(batches_for_worker) == 1 else batches_for_worker
                 )
 
-            self.store.create_run_rerun_job(
-                job_id=job_id,
-                run_id=str(derived_run["run_id"]),
-                case_ids=all_case_ids,
-                worker_shards=worker_shards,
+            self.store.update_run_rerun_job(
+                job_id,
                 rerun_batches=rerun_batches,
-                selected_error_types=selected_error_types,
-            )
-            self.store.update_run_rerun_fields(
-                run_id=str(derived_run["run_id"]),
-                rerun_status="syncing",
-                rerun_job_id=job_id,
             )
             if self.asset_syncer is not None:
                 self.asset_syncer.start_rerun_sync_async(job_id=job_id, run_id=str(derived_run["run_id"]))

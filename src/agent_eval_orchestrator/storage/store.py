@@ -1617,6 +1617,7 @@ class Store:
         *,
         status: str | None = None,
         sync_job_id: str | None = None,
+        rerun_batches: dict[str, str | list[str]] | None = None,
         error_text: str | None = None,
         finished: bool = False,
     ) -> dict[str, Any] | None:
@@ -1629,15 +1630,20 @@ class Store:
                 return None
             next_status = status if status is not None else str(row["status"])
             next_sync_job_id = sync_job_id if sync_job_id is not None else row["sync_job_id"]
+            next_rerun_batches = (
+                json.dumps(rerun_batches, ensure_ascii=False)
+                if rerun_batches is not None
+                else row["rerun_batches_json"]
+            )
             next_error = error_text if error_text is not None else row["error_text"]
             finished_at = now_iso() if finished else row["finished_at"]
             conn.execute(
                 """
                 UPDATE run_rerun_jobs
-                SET status = ?, sync_job_id = ?, error_text = ?, finished_at = ?
+                SET status = ?, sync_job_id = ?, rerun_batches_json = ?, error_text = ?, finished_at = ?
                 WHERE job_id = ?
                 """,
-                (next_status, next_sync_job_id, next_error, finished_at, job_id),
+                (next_status, next_sync_job_id, next_rerun_batches, next_error, finished_at, job_id),
             )
             updated = conn.execute(
                 "SELECT * FROM run_rerun_jobs WHERE job_id = ?",
