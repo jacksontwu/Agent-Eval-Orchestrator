@@ -844,13 +844,13 @@ INDEX_HTML = """<!doctype html>
     function rerunDisabledReason(detail) {
       if (!detail) return "Run 尚未全部完成";
       if ((detail.activeDerivedReruns || []).length) return "已有派生重跑任务进行中";
+      if (["syncing", "running"].includes(String(detail.rerunStatus || ""))) return "已有重跑任务进行中";
+      if ((detail.exceptionCount || 0) <= 0) return "没有需要重跑的 exception case";
       const status = String(detail.run?.status || detail.status || "").toLowerCase();
       const primaryFinished = detail.canRerunExceptions !== undefined
         ? detail.canRerunExceptions || detail.rerunStatus === "syncing" || detail.rerunStatus === "running"
         : status === "finished";
       if (!primaryFinished && !detail.canRerunExceptions) return "Run 尚未全部完成";
-      if ((detail.exceptionCount || 0) <= 0) return "没有需要重跑的 exception case";
-      if (["syncing", "running"].includes(String(detail.rerunStatus || ""))) return "已有重跑任务进行中";
       return "";
     }
 
@@ -1288,6 +1288,7 @@ INDEX_HTML = """<!doctype html>
         (run.sync_status ? " · sync: " + run.sync_status : "");
 
       const exceptionLine = formatExceptionDisplayText(detail);
+      const rerunReason = rerunDisabledReason(detail);
       root.innerHTML =
         '<div class="detail-grid">' +
           '<div class="stat"><div class="subtle">Workers</div><strong>' + groups.length + '</strong></div>' +
@@ -1303,6 +1304,7 @@ INDEX_HTML = """<!doctype html>
         '<div class="actions" style="margin-bottom:16px">' +
           '<button class="primary" type="button" id="openGlobalViewerBtn">打开 Harbor Viewer</button>' +
           '<button class="secondary" type="button" id="rerunExceptionsBtn">重跑 Exception</button>' +
+          (rerunReason ? '<span class="subtle">' + esc(rerunReason) + '</span>' : '') +
         '</div>' +
         renderRerunStatusPanel(detail) +
         (groups.length ? renderWorkerTabsHtml(groups) : '<div class="empty">这个 task 暂无 worker 执行记录</div>') +
@@ -1325,9 +1327,8 @@ INDEX_HTML = """<!doctype html>
       }
       const rerunBtn = root.querySelector("#rerunExceptionsBtn");
       if (rerunBtn) {
-        const reason = rerunDisabledReason(detail);
-        rerunBtn.disabled = Boolean(reason);
-        rerunBtn.title = reason || "";
+        rerunBtn.disabled = Boolean(rerunReason);
+        rerunBtn.title = rerunReason || "";
         rerunBtn.addEventListener("click", async () => {
           await startRerunExceptions(run.run_id, detail);
         });
