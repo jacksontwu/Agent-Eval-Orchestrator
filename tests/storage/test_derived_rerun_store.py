@@ -45,6 +45,11 @@ def test_list_active_derived_reruns_for_parent(store):
         model_profile_ref=parent_template["model_profile_ref"],
         note=parent_template["note"],
     )
+    syncing = store.create_run(
+        template_id=child_template["template_id"],
+        display_name="syncing child",
+        parent_run_id=parent["run_id"],
+    )
     running = store.create_run(
         template_id=child_template["template_id"],
         display_name="running child",
@@ -55,9 +60,13 @@ def test_list_active_derived_reruns_for_parent(store):
         display_name="done child",
         parent_run_id=parent["run_id"],
     )
+    store.update_run_rerun_fields(run_id=syncing["run_id"], rerun_status="syncing")
     store.update_run_rerun_fields(run_id=running["run_id"], rerun_status="running")
     store.update_run_rerun_fields(run_id=done["run_id"], rerun_status="succeeded")
 
     active = store.list_active_derived_reruns(parent["run_id"])
 
-    assert [run["run_id"] for run in active] == [running["run_id"]]
+    assert [run["run_id"] for run in active] == [
+        syncing["run_id"],
+        running["run_id"],
+    ]
