@@ -472,6 +472,76 @@ def test_start_rerun_filters_selected_types_from_exception_txt(store, tmp_path):
     assert rerun_batch["selected_case_ids"] == ["exc-a"]
 
 
+def test_start_rerun_maps_harbor_trial_task_name_to_selected_case_id(store, tmp_path):
+    dataset = tmp_path / "dataset"
+    full_case_id = "instance_element-hq__element-web-4fec436883b601a3cac2d4a58067e597f737b817-vnan"
+    (dataset / full_case_id).mkdir(parents=True)
+    template = store.create_task_template(
+        owner="default",
+        name="exc-test",
+        dataset_ref=str(dataset),
+        executor_kind="harbor-docker",
+        executor_config={},
+        model_profile_ref=None,
+        note="",
+    )
+    run = store.create_run(template_id=template["template_id"], display_name="swe-p-0001")
+    store.register_worker(
+        worker_id="worker-a",
+        display_name="worker-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={},
+    )
+    batch = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=[full_case_id],
+        preferred_worker_id="worker-a",
+        batch_options={},
+    )
+    store.update_batch_progress(
+        batch_id=batch["batch_id"],
+        worker_id="worker-a",
+        status="succeeded",
+        current_step=None,
+        finished=True,
+        cases=[
+            {
+                "caseId": "instance_element-hq__element-web",
+                "status": "succeeded",
+                "score": 1.0,
+                "artifactIndex": {
+                    "trialDir": str(tmp_path / "imported" / "instance_element-hq__element-web__abc")
+                },
+            }
+        ],
+    )
+    jobs_root = tmp_path / "harbor" / "jobs"
+    job_dir = jobs_root / "swe-p-0001"
+    _write_jobs_trial(
+        job_dir,
+        "instance_element-hq__element-web__abc",
+        task_name=full_case_id,
+        exception_text="Traceback (most recent call last):\nPermissionError: denied\n",
+    )
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {"combinedJobsDir": str(jobs_root)},
+    )
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(
+        run["run_id"],
+        config={"selectedErrorTypes": ["PermissionError"]},
+    )
+
+    assert result["exceptionCount"] == 1
+    assert result["workerShards"] == {"worker-a": 1}
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["selected_case_ids"] == [full_case_id]
+
+
 def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,

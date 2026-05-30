@@ -361,6 +361,27 @@ class RunRerunCoordinator:
         for batch in self.store.list_primary_batches_for_run(run_id):
             worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip()
             selected_case_ids = list(batch.get("selected_case_ids") or [])
+            for selected_case_id in selected_case_ids:
+                selected = str(selected_case_id or "").strip()
+                if not selected:
+                    continue
+                indexed.setdefault(
+                    selected,
+                    {
+                        "case_id": selected,
+                        "parent_batch_id": str(batch["batch_id"]),
+                        "worker_id": worker_id,
+                        "case": {
+                            "case_id": selected,
+                            "original_case_id": selected,
+                            "status": "errored",
+                            "score": None,
+                            "metrics": {},
+                            "artifact_index": {},
+                            "error_text": None,
+                        },
+                    },
+                )
             for case in self.store.list_case_runs(str(batch["batch_id"])):
                 item = {
                     "case_id": str(case["case_id"]),
