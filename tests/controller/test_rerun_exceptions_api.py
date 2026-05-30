@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from http.client import HTTPConnection
 from threading import Thread
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
 from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator
 from agent_eval_orchestrator.controller.server import Handler, ThreadedServer
+from agent_eval_orchestrator.core.ids import sanitize_name
 from conftest import seed_finished_run_with_cases
 
 
@@ -68,6 +70,16 @@ def _make_worker_local(store, tmp_path):
             "localToController": True,
         },
     )
+
+
+def _write_jobs_trial(job_dir: Path, trial_name: str, *, task_name: str) -> Path:
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps({"trial_name": trial_name, "task_name": task_name}),
+        encoding="utf-8",
+    )
+    return trial_dir
 
 
 def test_post_rerun_exceptions_happy_path(store, tmp_path):
@@ -445,6 +457,110 @@ def test_heartbeat_merges_exception_rerun_into_parent(store, tmp_path):
     assert by_id["exc-a"]["status"] == "succeeded"
     updated_run = store.get_run(run["run_id"])
     assert updated_run["rerun_status"] == "succeeded"
+    server.shutdown()
+
+
+def test_heartbeat_merges_derived_exception_rerun_into_cloned_parent(store, tmp_path):
+    run, original_parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+            {
+                "case_id": "exc-a",
+                "status": "errored",
+                "error_text": "ValueError: boom",
+            },
+        ],
+    )
+    original_jobs_dir = tmp_path / "original-harbor" / "jobs"
+    original_job_dir = original_jobs_dir / sanitize_name(str(run["display_name"]))
+    (original_job_dir / "config.json").parent.mkdir(parents=True)
+    (original_job_dir / "config.json").write_text(
+        json.dumps({"job_name": original_job_dir.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
+    original_ok_trial = _write_jobs_trial(original_job_dir, "ok__old", task_name="ok")
+    original_exc_trial = _write_jobs_trial(original_job_dir, "exc-a__old", task_name="exc-a")
+    store.update_task_template_executor_config(
+        str(run["template_id"]),
+        {"combinedJobsDir": str(original_jobs_dir)},
+    )
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+    result = coordinator.start_rerun(run["run_id"])
+    derived_run = store.get_run(result["runId"])
+    derived_template = store.get_task_template(str(derived_run["template_id"]))
+    derived_jobs_dir = Path(derived_template["executor_config"]["combinedJobsDir"])
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    cloned_parent = store.get_batch(rerun_batch["parent_batch_id"])
+
+    assert derived_run["parent_run_id"] == run["run_id"]
+    assert cloned_parent["run_id"] == derived_run["run_id"]
+    assert cloned_parent["batch_id"] != original_parent["batch_id"]
+    assert derived_jobs_dir == derived_jobs_dir_for_run(store=store, run=derived_run)
+    assert derived_jobs_dir != original_jobs_dir
+    assert original_ok_trial.exists()
+    assert original_exc_trial.exists()
+
+    rebuild_calls = []
+
+    def record_rebuild(*, store, run_id, jobs_dir):
+        rebuild_calls.append({"run_id": run_id, "jobs_dir": jobs_dir})
+
+    server = start_test_server(store, tmp_path, 9898)
+    conn = HTTPConnection("127.0.0.1", 9898)
+    body = json.dumps(
+        {
+            "batchId": rerun_batch["batch_id"],
+            "workerId": "worker-a",
+            "status": "succeeded",
+            "finished": True,
+            "executorMetadata": {"combinedJobsDir": str(derived_jobs_dir)},
+            "cases": [
+                {
+                    "caseId": "exc-a",
+                    "status": "succeeded",
+                    "score": 1.0,
+                    "metrics": {},
+                    "artifactIndex": {},
+                }
+            ],
+            "summary": {"succeeded": 1, "failed": 0, "errored": 0, "total": 1},
+        }
+    )
+    with patch(
+        "agent_eval_orchestrator.controller.server._rebuild_merged_job_for_run",
+        side_effect=record_rebuild,
+    ):
+        conn.request(
+            "POST",
+            "/api/workers/heartbeat",
+            body=body,
+            headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+        )
+        resp = conn.getresponse()
+        payload = json.loads(resp.read().decode("utf-8"))
+
+    assert resp.status == 200
+    assert payload["batch"]["batch_id"] == rerun_batch["batch_id"]
+    original_cases = {
+        case["case_id"]: case for case in store.list_case_runs(original_parent["batch_id"])
+    }
+    assert original_cases["ok"]["status"] == "succeeded"
+    assert original_cases["exc-a"]["status"] == "errored"
+    cloned_cases = {
+        case["case_id"]: case for case in store.list_case_runs(cloned_parent["batch_id"])
+    }
+    assert cloned_cases["ok"]["status"] == "succeeded"
+    assert cloned_cases["exc-a"]["status"] == "succeeded"
+    assert store.get_run(derived_run["run_id"])["rerun_status"] == "succeeded"
+    assert store.get_run_rerun_job(job["job_id"])["status"] == "succeeded"
+    assert store.list_case_runs(rerun_batch["batch_id"]) == []
+    assert rebuild_calls == [
+        {"run_id": derived_run["run_id"], "jobs_dir": derived_jobs_dir.resolve()}
+    ]
+    assert original_ok_trial.exists()
+    assert original_exc_trial.exists()
     server.shutdown()
 
 
