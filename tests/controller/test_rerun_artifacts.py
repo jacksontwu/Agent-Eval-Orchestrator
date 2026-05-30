@@ -138,6 +138,22 @@ def test_copy_jobs_tree_rejects_symlink_target(tmp_path):
     assert target.is_symlink()
 
 
+def test_copy_jobs_tree_rejects_broken_symlink_target(tmp_path):
+    source = tmp_path / "source-jobs"
+    target = tmp_path / "target-link"
+    _write_trial(source / "merged", "case-a__old")
+    try:
+        target.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unsupported: {exc}")
+
+    with pytest.raises(RuntimeError) as exc:
+        copy_jobs_tree(source, target)
+
+    assert "target jobs path exists but is not a directory" in str(exc.value)
+    assert target.is_symlink()
+
+
 def test_delete_trials_for_cases_missing_jobs_dir_returns_empty(tmp_path):
     removed = delete_trials_for_cases(
         jobs_dir=tmp_path / "missing",

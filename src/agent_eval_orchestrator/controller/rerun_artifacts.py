@@ -33,7 +33,7 @@ def copy_jobs_tree(source: Path, target: Path) -> None:
         raise RuntimeError(
             f"source and target jobs directories must not overlap: {source} -> {target}"
         )
-    if target.exists() and (target.is_symlink() or not target.is_dir()):
+    if target.is_symlink() or (target.exists() and not target.is_dir()):
         raise RuntimeError(f"target jobs path exists but is not a directory: {target}")
     if target.exists():
         shutil.rmtree(target)
