@@ -227,6 +227,8 @@ class Store:
             run_columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(runs)").fetchall()
             }
+            if "parent_run_id" not in run_columns:
+                conn.execute("ALTER TABLE runs ADD COLUMN parent_run_id TEXT")
             for column, ddl in {
                 "sync_status": "TEXT NOT NULL DEFAULT ''",
                 "sync_job_id": "TEXT",
@@ -440,7 +442,13 @@ class Store:
             ).fetchone()
         return self._template_item(row) if row else None
 
-    def create_run(self, *, template_id: str, display_name: str | None = None) -> dict[str, Any]:
+    def create_run(
+        self,
+        *,
+        template_id: str,
+        display_name: str | None = None,
+        parent_run_id: str | None = None,
+    ) -> dict[str, Any]:
         template = self.get_task_template(template_id)
         if not template:
             raise RuntimeError("template not found")
@@ -452,10 +460,10 @@ class Store:
                 """
                 INSERT INTO runs(
                     run_id, template_id, owner, display_name, bound_worker_id,
-                    latest_batch_id, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, NULL, NULL, ?, ?)
+                    latest_batch_id, parent_run_id, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, NULL, NULL, ?, ?, ?)
                 """,
-                (run_id, template_id, template["owner"], name, now, now),
+                (run_id, template_id, template["owner"], name, parent_run_id, now, now),
             )
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return self._run_item(row)
@@ -468,6 +476,19 @@ class Store:
     def list_runs(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()
+        return [self._run_item(row) for row in rows]
+
+    def list_active_derived_reruns(self, parent_run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM runs
+                WHERE parent_run_id = ?
+                  AND rerun_status IN ('syncing', 'running')
+                ORDER BY created_at ASC
+                """,
+                (parent_run_id,),
+            ).fetchall()
         return [self._run_item(row) for row in rows]
 
     def list_batches_for_run(self, run_id: str) -> list[dict[str, Any]]:
