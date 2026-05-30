@@ -806,6 +806,86 @@ class Store:
             row = conn.execute("SELECT * FROM batches WHERE batch_id = ?", (batch_id,)).fetchone()
         return self._batch_item(row)
 
+    def clone_primary_batches_to_run(
+        self,
+        *,
+        source_run_id: str,
+        target_run_id: str,
+    ) -> dict[str, str]:
+        target_run = self.get_run(target_run_id)
+        if not target_run:
+            raise RuntimeError("target run not found")
+        mapping: dict[str, str] = {}
+        now = now_iso()
+        source_batches = self.list_primary_batches_for_run(source_run_id)
+        with self.connect() as conn:
+            for source in source_batches:
+                new_batch_id = new_id("batch")
+                batch_root = str(self.layout.batch_dir(target_run["owner"], target_run_id, new_batch_id))
+                self.layout.batch_dir(target_run["owner"], target_run_id, new_batch_id).mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO batches(
+                        batch_id, run_id, owner, status, current_step, preferred_worker_id,
+                        assigned_worker_id, executor_kind, executor_metadata_json,
+                        selected_case_ids_json, batch_options_json, summary_json,
+                        artifact_index_json, batch_root, created_at, started_at, finished_at,
+                        error_text, parent_batch_id, batch_kind
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'primary')
+                    """,
+                    (
+                        new_batch_id,
+                        target_run_id,
+                        target_run["owner"],
+                        source["status"],
+                        source.get("current_step"),
+                        source.get("preferred_worker_id"),
+                        source.get("assigned_worker_id"),
+                        source["executor_kind"],
+                        json.dumps(source.get("executor_metadata") or {}, ensure_ascii=False),
+                        json.dumps(source.get("selected_case_ids") or [], ensure_ascii=False),
+                        json.dumps(source.get("batch_options") or {}, ensure_ascii=False),
+                        json.dumps(source.get("summary") or {}, ensure_ascii=False),
+                        json.dumps(source.get("artifact_index") or {}, ensure_ascii=False),
+                        batch_root,
+                        now,
+                        source.get("started_at"),
+                        source.get("finished_at"),
+                        source.get("error_text"),
+                    ),
+                )
+                for case in self.list_case_runs(str(source["batch_id"])):
+                    conn.execute(
+                        """
+                        INSERT INTO case_runs(
+                            case_run_id, batch_id, case_id, status, score, metrics_json,
+                            artifact_index_json, error_text, created_at, updated_at
+                        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            new_id("case"),
+                            new_batch_id,
+                            case["original_case_id"],
+                            case["status"],
+                            case.get("score"),
+                            json.dumps(case.get("metrics") or {}, ensure_ascii=False),
+                            json.dumps(case.get("artifact_index") or {}, ensure_ascii=False),
+                            case.get("error_text"),
+                            case.get("created_at") or now,
+                            now,
+                        ),
+                    )
+                mapping[str(source["batch_id"])] = new_batch_id
+            if source_batches:
+                conn.execute(
+                    "UPDATE runs SET latest_batch_id = ?, updated_at = ? WHERE run_id = ?",
+                    (list(mapping.values())[-1], now, target_run_id),
+                )
+        return mapping
+
     def create_sharded_batches(
         self,
         *,
