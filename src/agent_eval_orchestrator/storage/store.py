@@ -2294,18 +2294,12 @@ class Store:
             actual_cases = self.list_case_runs(str(batch["batch_id"]))
             unmatched_actual = list(actual_cases)
             for case in actual_cases:
-                case_item = dict(case)
-                case_item["artifact_index"] = self._task_detail_artifact_summary(
-                    case_item.get("artifact_index") or {}
-                )
                 group["cases"].append(
-                    {
-                        **case_item,
-                        "batchId": batch["batch_id"],
-                        "batchStatus": batch["status"],
-                        "runId": run["run_id"],
-                        "runName": run["display_name"],
-                    }
+                    self._task_detail_case_summary(
+                        case,
+                        batch_id=str(batch["batch_id"]),
+                        batch_status=str(batch["status"]),
+                    )
                 )
             for case_id in batch.get("selected_case_ids") or []:
                 match_idx = next(
@@ -2329,19 +2323,13 @@ class Store:
                 group["cases"].append(
                     {
                         "case_run_id": None,
-                        "batch_id": batch["batch_id"],
                         "case_id": case_id,
                         "status": placeholder_status,
                         "score": None,
                         "error_text": None,
-                        "created_at": batch["created_at"],
-                        "updated_at": batch["started_at"] or batch["created_at"],
-                        "metrics": {},
-                        "artifact_index": {},
+                        "errorType": None,
                         "batchId": batch["batch_id"],
                         "batchStatus": batch["status"],
-                        "runId": run["run_id"],
-                        "runName": run["display_name"],
                     }
                 )
         worker_group_list = sorted(
@@ -2405,12 +2393,23 @@ class Store:
         }
 
     @staticmethod
-    def _task_detail_artifact_summary(artifact_index: dict[str, Any]) -> dict[str, Any]:
-        allowed = ("trialDir", "resultPath", "logPath", "agentDir", "verifierDir")
+    def _task_detail_case_summary(
+        case: dict[str, Any],
+        *,
+        batch_id: str,
+        batch_status: str,
+    ) -> dict[str, Any]:
+        metrics = case.get("metrics") or {}
+        error_type = case.get("errorType") or metrics.get("errorType")
         return {
-            key: artifact_index[key]
-            for key in allowed
-            if artifact_index.get(key)
+            "case_run_id": case.get("case_run_id"),
+            "case_id": case.get("case_id"),
+            "status": case.get("status"),
+            "score": case.get("score"),
+            "error_text": case.get("error_text"),
+            "errorType": str(error_type).strip() if error_type else None,
+            "batchId": batch_id,
+            "batchStatus": batch_status,
         }
 
     @staticmethod

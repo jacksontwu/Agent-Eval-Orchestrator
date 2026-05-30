@@ -39,7 +39,7 @@ def test_eval_task_detail_dedupes_long_selected_case_ids(store):
     assert worker_cases[0]["status"] == "errored"
 
 
-def test_eval_task_detail_returns_slim_worker_group_artifacts(store):
+def test_eval_task_detail_returns_slim_worker_group_cases(store):
     run, batch = seed_finished_run_with_cases(
         store,
         cases=[
@@ -65,14 +65,21 @@ def test_eval_task_detail_returns_slim_worker_group_artifacts(store):
     group_batch = group["batches"][0]
     top_level_batch = next(item for item in detail["batches"] if item["batch_id"] == batch["batch_id"])
 
-    assert case["artifact_index"] == {
-        "trialDir": "/tmp/jobs/batch/case-a__old",
-        "resultPath": "/tmp/jobs/batch/case-a__old/result.json",
-        "logPath": "/tmp/jobs/batch/case-a__old/trial.log",
-        "agentDir": "/tmp/jobs/batch/case-a__old/agent",
-        "verifierDir": "/tmp/jobs/batch/case-a__old/verifier",
+    assert case == {
+        "case_run_id": case["case_run_id"],
+        "case_id": "case-a",
+        "status": "succeeded",
+        "score": 1.0,
+        "error_text": None,
+        "errorType": None,
+        "batchId": batch["batch_id"],
+        "batchStatus": "succeeded",
     }
     assert "largeUnusedField" not in json.dumps(group, ensure_ascii=False)
+    assert "artifact_index" not in case
+    assert "metrics" not in case
+    assert "created_at" not in case
+    assert "updated_at" not in case
     assert group_batch == {
         "batch_id": batch["batch_id"],
         "status": "succeeded",
