@@ -285,17 +285,43 @@ class RunRerunCoordinator:
             list(worker_shards.keys()),
         )
         self._validate_executor_config(body_config)
+        worker_ids = list(worker_shards.keys())
+        workers = self.store.list_workers()
         try:
             validate_create_task_assets(
                 dataset_path=dataset_path,
                 bitfun_cli_path=bitfun_cli_path,
                 bitfun_config_dir=bitfun_config_dir,
                 case_ids=all_case_ids,
-                workers=self.store.list_workers(),
-                worker_ids=list(worker_shards.keys()),
+                workers=workers,
+                worker_ids=worker_ids,
                 controller_shared_root=controller_root,
             )
         except RuntimeError as exc:
+            raise RerunValidationError(400, str(exc)) from exc
+        jobs_dir = str(
+            config.get("jobsDir")
+            or existing_executor_config.get("combinedJobsDir")
+            or (DEFAULT_HARBOR_REPO / "jobs")
+        )
+        workers_by_id = {str(item["worker_id"]): item for item in workers}
+        try:
+            build_asset_sync_executor_config(
+                worker_ids=worker_ids,
+                workers=workers,
+                body_config=body_config,
+                jobs_dir=jobs_dir,
+            )
+            build_sync_manifest(
+                run_id="prevalidate-rerun",
+                dataset_path=dataset_path.resolve(),
+                bitfun_cli_path=bitfun_cli_path.resolve(),
+                bitfun_config_dir=bitfun_config_dir.resolve(),
+                worker_shards=worker_shards,
+                workers_by_id=workers_by_id,
+                controller_shared_root=controller_root,
+            )
+        except (KeyError, RuntimeError, TypeError, ValueError) as exc:
             raise RerunValidationError(400, str(exc)) from exc
 
     def _apply_config(

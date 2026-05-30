@@ -660,6 +660,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "parentBatchId": batch.get("parent_batch_id"),
                             }
                         )
+                job = dict(job)
+                job.pop("rerun_batches", None)
+                job["rerunBatches"] = rerun_batches
             remaining = len(self.store.list_exception_cases_for_run(run_id))
             error_text = str((job or {}).get("error_text") or "") or None
             _json_response(

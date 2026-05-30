@@ -396,6 +396,40 @@ def test_start_rerun_config_validation_happens_before_job_creation(store, tmp_pa
     assert store.get_task_template(run["template_id"])["dataset_ref"] == original_template["dataset_ref"]
 
 
+def test_start_rerun_rejects_missing_local_worker_shared_root_before_deriving_run(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    store.register_worker(
+        worker_id="worker-a",
+        display_name="worker-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"localToController": True},
+    )
+    assets = _prepare_rerun_assets(tmp_path, ["exc-a"])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    with pytest.raises(RerunValidationError) as exc:
+        coordinator.start_rerun(
+            run["run_id"],
+            config={
+                "datasetPath": assets["datasetPath"],
+                "bitfunCliPath": assets["bitfunCliPath"],
+                "bitfunConfigDir": assets["bitfunConfigDir"],
+                "jobsDir": assets["jobsDir"],
+                "executorConfig": {"nConcurrent": 2},
+            },
+        )
+
+    assert exc.value.code == 400
+    assert "missing capabilities.sharedRoot" in exc.value.message
+    assert store.list_active_derived_reruns(run["run_id"]) == []
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
+
+
 def test_start_rerun_resolves_truncated_case_ids_to_dataset_dirs(store, tmp_path):
     import json
 

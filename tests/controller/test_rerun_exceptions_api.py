@@ -314,6 +314,8 @@ def test_get_rerun_status_includes_list_valued_rerun_batches(store, tmp_path):
         rerun_b["batch_id"],
     ]
     assert {item["workerId"] for item in payload["rerunBatches"]} == {"worker-a"}
+    assert "rerun_batches" not in payload["job"]
+    assert payload["job"]["rerunBatches"] == payload["rerunBatches"]
     server.shutdown()
 
 
