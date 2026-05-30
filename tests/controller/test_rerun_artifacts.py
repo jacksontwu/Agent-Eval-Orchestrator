@@ -1,0 +1,61 @@
+import json
+from pathlib import Path
+
+from agent_eval_orchestrator.controller.rerun_artifacts import (
+    copy_jobs_tree,
+    delete_trials_for_cases,
+    derived_jobs_dir_for_run,
+)
+
+
+def _write_trial(job_dir: Path, trial_name: str, *, task_name: str | None = None) -> None:
+    trial_dir = job_dir / trial_name
+    trial_dir.mkdir(parents=True)
+    payload = {"trial_name": trial_name}
+    if task_name is not None:
+        payload["task_name"] = task_name
+    (trial_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_derived_jobs_dir_for_run_uses_run_archive(store):
+    template = store.create_task_template(
+        owner="default",
+        name="x",
+        dataset_ref="/tmp/dataset",
+        executor_kind="harbor-docker",
+        executor_config={},
+        model_profile_ref=None,
+        note="",
+    )
+    run = store.create_run(template_id=template["template_id"], display_name="child")
+
+    jobs_dir = derived_jobs_dir_for_run(store=store, run=run)
+
+    assert jobs_dir == store.layout.run_dir("default", run["run_id"]) / "harbor" / "jobs"
+
+
+def test_copy_jobs_tree_replaces_existing_target(tmp_path):
+    source = tmp_path / "source-jobs"
+    target = tmp_path / "target-jobs"
+    _write_trial(source / "merged", "case-a__old")
+    _write_trial(target / "stale", "case-stale__old")
+
+    copy_jobs_tree(source, target)
+
+    assert (target / "merged" / "case-a__old" / "result.json").exists()
+    assert not (target / "stale").exists()
+
+
+def test_delete_trials_for_cases_removes_only_selected_trials(tmp_path):
+    jobs_dir = tmp_path / "jobs"
+    merged = jobs_dir / "merged-job"
+    _write_trial(merged, "case-a__old", task_name="case-a")
+    _write_trial(merged, "case-b__old", task_name="case-b")
+    _write_trial(merged, "case-c__old")
+
+    removed = delete_trials_for_cases(jobs_dir=jobs_dir, case_ids=["case-a", "case-c"])
+
+    assert sorted(path.name for path in removed) == ["case-a__old", "case-c__old"]
+    assert not (merged / "case-a__old").exists()
+    assert (merged / "case-b__old" / "result.json").exists()
+    assert not (merged / "case-c__old").exists()
