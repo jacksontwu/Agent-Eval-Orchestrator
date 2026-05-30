@@ -528,6 +528,10 @@ def test_heartbeat_merges_derived_exception_rerun_into_cloned_parent(store, tmp_
     )
     original_ok_trial = _write_jobs_trial(original_job_dir, "ok__old", task_name="ok")
     original_exc_trial = _write_jobs_trial(original_job_dir, "exc-a__old", task_name="exc-a")
+    (original_exc_trial / "exception.txt").write_text(
+        "Traceback (most recent call last):\nValueError: boom\n",
+        encoding="utf-8",
+    )
     store.update_task_template_executor_config(
         str(run["template_id"]),
         {"combinedJobsDir": str(original_jobs_dir)},

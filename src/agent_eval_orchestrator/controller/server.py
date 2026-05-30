@@ -195,7 +195,7 @@ def _job_sources_for_run(
     sources: list[Path] = []
     primary_batches = store.list_primary_batches_for_run(run_id)
     primary_batch_ids = {str(batch["batch_id"]) for batch in primary_batches}
-    if is_derived_run and jobs_dir.exists():
+    if is_derived_run and _path_exists(jobs_dir):
         for child in sorted(jobs_dir.iterdir(), key=lambda path: path.name):
             if (
                 child.is_dir()
@@ -220,16 +220,20 @@ def _job_sources_for_run(
             artifact_job_dir = Path(raw_job_dir).expanduser()
             if _is_subpath(artifact_job_dir, jobs_dir):
                 candidates.append(artifact_job_dir)
-        source = next(
-            (path.resolve() for path in candidates if str(path).strip() and path.exists()),
-            None,
-        )
+        source = next((path.resolve() for path in candidates if _path_exists(path)), None)
         if source is None:
             continue
         sources.append(source)
     if sources:
         grouped_sources[merged_job_name] = sources
     return list(grouped_sources.items())
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
 
 
 def _validate_controller_internal_ip(value: str) -> bool:

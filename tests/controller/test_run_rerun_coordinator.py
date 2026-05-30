@@ -7,6 +7,7 @@ import pytest
 import agent_eval_orchestrator.controller.run_rerun_coordinator as rerun_coordinator_module
 from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator, RerunValidationError
+from agent_eval_orchestrator.core.ids import sanitize_name
 from conftest import seed_finished_run_with_cases
 
 
@@ -386,14 +387,89 @@ def _make_worker_local(store, tmp_path):
     )
 
 
-def _write_jobs_trial(job_dir, trial_name, *, task_name):
+def _write_jobs_trial(job_dir, trial_name, *, task_name, exception_text=None):
     trial_dir = job_dir / trial_name
     trial_dir.mkdir(parents=True)
     (trial_dir / "result.json").write_text(
         json.dumps({"trial_name": trial_name, "task_name": task_name}),
         encoding="utf-8",
     )
+    if exception_text is not None:
+        (trial_dir / "exception.txt").write_text(exception_text, encoding="utf-8")
     return trial_dir
+
+
+def test_start_rerun_selects_trials_from_exception_txt_not_db_rows(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "db says errored"},
+            {"case_id": "exc-b", "status": "errored", "error_text": "db says errored"},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    jobs_root = tmp_path / "harbor" / "jobs"
+    job_dir = jobs_root / sanitize_name(str(run["display_name"]))
+    _write_jobs_trial(
+        job_dir,
+        "exc-a__old",
+        task_name="exc-a",
+        exception_text="Traceback (most recent call last):\nTimeoutError: timed out\n",
+    )
+    _write_jobs_trial(job_dir, "exc-b__old", task_name="exc-b")
+    _write_jobs_trial(job_dir, "ok__old", task_name="ok")
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {"combinedJobsDir": str(jobs_root)},
+    )
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(run["run_id"])
+
+    assert result["exceptionCount"] == 1
+    assert result["selectedErrorTypes"] == ["TimeoutError"]
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    assert job["worker_shards"] == {"worker-a": ["exc-a"]}
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["selected_case_ids"] == ["exc-a"]
+
+
+def test_start_rerun_filters_selected_types_from_exception_txt(store, tmp_path):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "succeeded", "score": 1.0},
+            {"case_id": "exc-b", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    jobs_root = tmp_path / "harbor" / "jobs"
+    job_dir = jobs_root / sanitize_name(str(run["display_name"]))
+    _write_jobs_trial(
+        job_dir,
+        "exc-a__old",
+        task_name="exc-a",
+        exception_text="Traceback (most recent call last):\nPermissionError: denied\n",
+    )
+    _write_jobs_trial(
+        job_dir,
+        "exc-b__old",
+        task_name="exc-b",
+        exception_text="Traceback (most recent call last):\nAgentTimeoutError: timed out\n",
+    )
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {"combinedJobsDir": str(jobs_root)},
+    )
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(
+        run["run_id"],
+        config={"selectedErrorTypes": ["PermissionError"]},
+    )
+
+    assert result["exceptionCount"] == 1
+    assert result["selectedErrorTypes"] == ["PermissionError"]
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["selected_case_ids"] == ["exc-a"]
 
 
 def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp_path):

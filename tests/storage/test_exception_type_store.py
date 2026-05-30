@@ -92,6 +92,47 @@ def test_eval_task_detail_includes_exception_summary(store):
     assert detail["exceptionDisplay"]["uniqueCaseCount"] == 2
 
 
+def test_eval_task_detail_prefers_harbor_exception_txt_summary(store, tmp_path):
+    from agent_eval_orchestrator.core.ids import sanitize_name
+
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "db-exc", "status": "errored", "error_text": "db", "metrics": {"errorType": "DbError"}},
+            {"case_id": "disk-exc", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    run_row = store.get_run(run["run_id"])
+    job_name = sanitize_name(str(run_row["display_name"]))
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / job_name
+    trial_dir = job_dir / "disk-exc__old"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps({"task_name": "disk-exc", "trial_name": "disk-exc__old"}),
+        encoding="utf-8",
+    )
+    (trial_dir / "exception.txt").write_text(
+        "Traceback (most recent call last):\nPermissionError: denied\n",
+        encoding="utf-8",
+    )
+    store.update_task_template_executor_config(
+        str(run_row["template_id"]),
+        {"combinedJobsDir": str(jobs_dir)},
+    )
+
+    detail = store.get_eval_task_detail(run["run_id"])
+
+    assert detail["exceptionCount"] == 1
+    assert detail["canRerunExceptions"] is True
+    assert detail["exceptionSummary"] == {
+        "total": 1,
+        "byType": [{"errorType": "PermissionError", "count": 1}],
+    }
+    assert detail["exceptionDisplay"]["trialRecordCount"] == 1
+    assert detail["exceptionDisplay"]["uniqueCaseCount"] == 1
+
+
 def test_summarize_exception_display_for_run(store):
     run, _ = seed_finished_run_with_cases(
         store,

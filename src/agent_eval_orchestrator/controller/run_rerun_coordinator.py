@@ -6,13 +6,17 @@ from typing import TYPE_CHECKING, Any
 
 from agent_eval_orchestrator.controller.asset_syncer import build_sync_manifest, validate_create_task_assets
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
+from agent_eval_orchestrator.controller.harbor_exceptions import (
+    exception_type_from_text,
+    harbor_trial_case_id,
+)
 from agent_eval_orchestrator.controller.rerun_artifacts import (
     copy_jobs_tree,
     delete_trials_for_cases,
     derived_jobs_dir_for_run,
 )
 from agent_eval_orchestrator.core.defaults import DEFAULT_HARBOR_REPO, DEFAULT_PER_WORKER_CONCURRENCY
-from agent_eval_orchestrator.core.ids import new_id
+from agent_eval_orchestrator.core.ids import new_id, sanitize_name
 
 if TYPE_CHECKING:
     from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
@@ -41,18 +45,6 @@ class RunRerunCoordinator:
             raise RerunValidationError(404, "run not found")
         if not self.store.is_run_primary_terminal(run_id):
             raise RerunValidationError(409, "run not finished")
-        selected_error_types = self._resolve_selected_error_types(run_id=run_id, config=config)
-        if not selected_error_types:
-            raise RerunValidationError(400, "no exception cases")
-
-        filtered_items = self.store.filter_exception_cases_by_types(run_id, selected_error_types)
-        if not filtered_items:
-            raise RerunValidationError(400, "no matching exception cases")
-
-        grouped = self.store.group_exception_items_by_worker(filtered_items)
-        if not grouped:
-            raise RerunValidationError(400, "no exception cases")
-
         source_template = self.store.get_task_template(str(run["template_id"]))
         if not source_template:
             raise RerunValidationError(404, "task template not found")
@@ -62,6 +54,30 @@ class RunRerunCoordinator:
             template=source_template,
             existing_manifest=existing_manifest,
         )
+
+        exception_items = self._list_rerun_exception_items(
+            run=run,
+            template=source_template,
+            dataset_path=dataset_path,
+        )
+        selected_error_types = self._resolve_selected_error_types_from_items(
+            exception_items,
+            config=config,
+        )
+        if not selected_error_types:
+            raise RerunValidationError(400, "no exception cases")
+
+        selected_set = set(selected_error_types)
+        filtered_items = [
+            item for item in exception_items if str(item.get("error_type") or "") in selected_set
+        ]
+        if not filtered_items:
+            raise RerunValidationError(400, "no matching exception cases")
+
+        grouped = self.store.group_exception_items_by_worker(filtered_items)
+        if not grouped:
+            raise RerunValidationError(400, "no exception cases")
+
         worker_shards = self._resolve_worker_shards(grouped, dataset_path)
         all_case_ids = [
             case_id
@@ -227,6 +243,136 @@ class RunRerunCoordinator:
         if invalid:
             raise RerunValidationError(400, f"invalid error type(s): {', '.join(invalid)}")
         return selected
+
+    def _resolve_selected_error_types_from_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        config: dict[str, Any] | None,
+    ) -> list[str]:
+        available = sorted(
+            {
+                str(item.get("error_type") or "").strip()
+                for item in items
+                if str(item.get("error_type") or "").strip()
+            }
+        )
+        if not available:
+            return []
+        raw = (config or {}).get("selectedErrorTypes")
+        if raw is None:
+            return available
+        if not isinstance(raw, list):
+            raise RerunValidationError(400, "selectedErrorTypes must be an array")
+        selected = [str(item).strip() for item in raw if str(item).strip()]
+        if not selected:
+            raise RerunValidationError(400, "at least one error type required")
+        available_set = set(available)
+        invalid = sorted({item for item in selected if item not in available_set})
+        if invalid:
+            raise RerunValidationError(400, f"invalid error type(s): {', '.join(invalid)}")
+        return selected
+
+    def _list_rerun_exception_items(
+        self,
+        *,
+        run: dict[str, Any],
+        template: dict[str, Any],
+        dataset_path: Path,
+    ) -> list[dict[str, Any]]:
+        source_job_dir = self._source_job_dir_for_run(run=run, template=template)
+        if source_job_dir is not None:
+            return self._list_exception_items_from_job_dir(
+                run_id=str(run["run_id"]),
+                job_dir=source_job_dir,
+                dataset_path=dataset_path,
+            )
+        return self._list_exception_items_from_db(str(run["run_id"]))
+
+    def _source_job_dir_for_run(
+        self,
+        *,
+        run: dict[str, Any],
+        template: dict[str, Any],
+    ) -> Path | None:
+        raw_jobs_dir = str((template.get("executor_config") or {}).get("combinedJobsDir") or "").strip()
+        if not raw_jobs_dir:
+            return None
+        jobs_dir = Path(raw_jobs_dir).expanduser()
+        run_job_dir = jobs_dir / sanitize_name(str(run["display_name"]))
+        if run_job_dir.is_dir():
+            return run_job_dir
+        if jobs_dir.is_dir() and (jobs_dir / "config.json").exists():
+            return jobs_dir
+        return None
+
+    def _list_exception_items_from_db(self, run_id: str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for item in self.store.list_exception_cases_for_run(run_id):
+            case = dict(item.get("case") or {})
+            error_type = self.store.case_error_type(case)
+            enriched = dict(item)
+            enriched["error_type"] = error_type
+            items.append(enriched)
+        return items
+
+    def _list_exception_items_from_job_dir(
+        self,
+        *,
+        run_id: str,
+        job_dir: Path,
+        dataset_path: Path,
+    ) -> list[dict[str, Any]]:
+        case_index = self._primary_case_index(run_id=run_id, dataset_path=dataset_path)
+        items: list[dict[str, Any]] = []
+        seen_cases: set[str] = set()
+        for trial_dir in sorted(child for child in job_dir.iterdir() if child.is_dir()):
+            exception_path = trial_dir / "exception.txt"
+            if not exception_path.exists():
+                continue
+            case_id = harbor_trial_case_id(trial_dir)
+            if not case_id:
+                raise RerunValidationError(400, f"missing task_name for exception trial: {trial_dir.name}")
+            if case_id in seen_cases:
+                raise RerunValidationError(400, f"duplicate exception trial for case: {case_id}")
+            seen_cases.add(case_id)
+            source_item = case_index.get(case_id)
+            if source_item is None:
+                raise RerunValidationError(400, f"exception trial is not part of run: {case_id}")
+            error_type = exception_type_from_text(
+                exception_path.read_text(encoding="utf-8", errors="replace")
+            )
+            item = dict(source_item)
+            item["case_id"] = case_id
+            item["error_type"] = error_type
+            item["source_trial_dir"] = str(trial_dir)
+            item["source_trial_name"] = trial_dir.name
+            items.append(item)
+        return items
+
+    def _primary_case_index(self, *, run_id: str, dataset_path: Path) -> dict[str, dict[str, Any]]:
+        indexed: dict[str, dict[str, Any]] = {}
+        for batch in self.store.list_primary_batches_for_run(run_id):
+            worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip()
+            selected_case_ids = list(batch.get("selected_case_ids") or [])
+            for case in self.store.list_case_runs(str(batch["batch_id"])):
+                item = {
+                    "case_id": str(case["case_id"]),
+                    "parent_batch_id": str(batch["batch_id"]),
+                    "worker_id": worker_id,
+                    "case": case,
+                }
+                keys = {str(case["case_id"])}
+                resolved = self.store.resolve_dataset_case_id(
+                    dataset_path=dataset_path,
+                    case=case,
+                    selected_case_ids=selected_case_ids,
+                )
+                if resolved:
+                    keys.add(str(resolved))
+                for key in keys:
+                    indexed.setdefault(key, item)
+        return indexed
 
     def _filter_config_for_assets(self, config: dict[str, Any] | None) -> dict[str, Any] | None:
         if not config:

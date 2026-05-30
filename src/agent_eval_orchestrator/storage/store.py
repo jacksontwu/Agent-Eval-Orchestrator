@@ -12,6 +12,10 @@ from agent_eval_orchestrator.core.defaults import (
     DEFAULT_PER_WORKER_CONCURRENCY,
     DEFAULT_PRESET_DATASETS,
 )
+from agent_eval_orchestrator.controller.harbor_exceptions import (
+    exception_type_from_text,
+    harbor_trial_case_id,
+)
 from agent_eval_orchestrator.core.ids import new_id, now_iso, sanitize_name
 from agent_eval_orchestrator.storage.layout import Layout
 
@@ -587,6 +591,29 @@ class Store:
         total = sum(entry["count"] for entry in by_type)
         return {"total": total, "byType": by_type}
 
+    def summarize_harbor_exception_types_for_run(
+        self,
+        run_id: str,
+        *,
+        merged_jobs_dir: Path | None,
+    ) -> dict[str, Any] | None:
+        trial_items = self._list_harbor_exception_trial_items(
+            run_id,
+            merged_jobs_dir=merged_jobs_dir,
+        )
+        if trial_items is None:
+            return None
+        counts: dict[str, int] = {}
+        for item in trial_items:
+            error_type = str(item.get("errorType") or "UnknownException")
+            counts[error_type] = counts.get(error_type, 0) + 1
+        by_type = [
+            {"errorType": error_type, "count": count}
+            for error_type, count in counts.items()
+        ]
+        by_type.sort(key=lambda entry: (-entry["count"], entry["errorType"]))
+        return {"total": sum(entry["count"] for entry in by_type), "byType": by_type}
+
     def read_harbor_merged_job_stats(
         self,
         run_id: str,
@@ -618,11 +645,21 @@ class Store:
         *,
         merged_jobs_dir: Path | None = None,
     ) -> dict[str, Any]:
-        items = self.list_exception_cases_for_run(run_id)
-        display: dict[str, Any] = {
-            "trialRecordCount": len(items),
-            "uniqueCaseCount": len({str(item["case_id"]) for item in items}),
-        }
+        harbor_items = self._list_harbor_exception_trial_items(
+            run_id,
+            merged_jobs_dir=merged_jobs_dir,
+        )
+        if harbor_items is not None:
+            display: dict[str, Any] = {
+                "trialRecordCount": len(harbor_items),
+                "uniqueCaseCount": len({str(item["caseId"]) for item in harbor_items}),
+            }
+        else:
+            items = self.list_exception_cases_for_run(run_id)
+            display = {
+                "trialRecordCount": len(items),
+                "uniqueCaseCount": len({str(item["case_id"]) for item in items}),
+            }
         if merged_jobs_dir is not None:
             merged = self.read_harbor_merged_job_stats(run_id, merged_jobs_dir)
             if merged is not None:
@@ -630,6 +667,37 @@ class Store:
                 display["harborMergedErroredTrials"] = merged["erroredTrials"]
                 display["harborMergedTotalTrials"] = merged["totalTrials"]
         return display
+
+    def _list_harbor_exception_trial_items(
+        self,
+        run_id: str,
+        *,
+        merged_jobs_dir: Path | None,
+    ) -> list[dict[str, Any]] | None:
+        if merged_jobs_dir is None:
+            return None
+        run = self.get_run(run_id)
+        if not run:
+            return None
+        job_dir = merged_jobs_dir.expanduser() / sanitize_name(str(run["display_name"]))
+        if not job_dir.is_dir():
+            return None
+        items: list[dict[str, Any]] = []
+        for trial_dir in sorted(child for child in job_dir.iterdir() if child.is_dir()):
+            exception_path = trial_dir / "exception.txt"
+            if not exception_path.exists():
+                continue
+            case_id = harbor_trial_case_id(trial_dir)
+            items.append(
+                {
+                    "caseId": case_id or trial_dir.name,
+                    "trialName": trial_dir.name,
+                    "errorType": exception_type_from_text(
+                        exception_path.read_text(encoding="utf-8", errors="replace")
+                    ),
+                }
+            )
+        return items
 
     def filter_exception_cases_by_types(
         self,
@@ -2263,13 +2331,21 @@ class Store:
             worker_groups.values(),
             key=lambda item: (item["workerName"], item["workerId"]),
         )
-        exception_count = len(self.list_exception_cases_for_run(run_id))
-        exception_summary = self.summarize_exception_types_for_run(run_id)
         merged_jobs_dir: Path | None = None
         if template:
             raw_jobs_dir = str((template.get("executor_config") or {}).get("combinedJobsDir") or "").strip()
             if raw_jobs_dir:
                 merged_jobs_dir = Path(raw_jobs_dir)
+        harbor_exception_summary = self.summarize_harbor_exception_types_for_run(
+            run_id,
+            merged_jobs_dir=merged_jobs_dir,
+        )
+        if harbor_exception_summary is not None:
+            exception_summary = harbor_exception_summary
+            exception_count = int(harbor_exception_summary["total"])
+        else:
+            exception_count = len(self.list_exception_cases_for_run(run_id))
+            exception_summary = self.summarize_exception_types_for_run(run_id)
         exception_display = self.summarize_exception_display_for_run(
             run_id,
             merged_jobs_dir=merged_jobs_dir,
