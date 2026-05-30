@@ -34,6 +34,8 @@ class RunRerunCoordinator:
             raise RerunValidationError(404, "run not found")
         if not self.store.is_run_primary_terminal(run_id):
             raise RerunValidationError(409, "run not finished")
+        if str(run.get("rerun_status") or "") in {"syncing", "running"}:
+            raise RerunValidationError(409, "rerun already in progress")
         if self.store.list_active_derived_reruns(run_id):
             raise RerunValidationError(409, "rerun already in progress")
         selected_error_types = self._resolve_selected_error_types(run_id=run_id, config=config)
@@ -65,6 +67,14 @@ class RunRerunCoordinator:
         ]
         asset_config = self._filter_config_for_assets(dict(config or {}))
         config_supplied = self._has_applicable_config(asset_config)
+        if config_supplied:
+            self._prevalidate_config(
+                config=dict(asset_config or {}),
+                template=source_template,
+                fallback_manifest=existing_manifest,
+                worker_shards=worker_shards,
+                all_case_ids=all_case_ids,
+            )
         derived_template = self.store.clone_task_template(
             str(source_template["template_id"]),
             name=f"{source_template['name']} rerun",
@@ -224,6 +234,69 @@ class RunRerunCoordinator:
             if value not in (None, ""):
                 return True
         return False
+
+    def _prevalidate_config(
+        self,
+        *,
+        config: dict[str, Any],
+        template: dict[str, Any],
+        fallback_manifest: dict[str, Any],
+        worker_shards: dict[str, list[str]],
+        all_case_ids: list[str],
+    ) -> None:
+        existing_executor_config = dict(template.get("executor_config") or {})
+        controller_root = (
+            self.asset_syncer.controller_shared_root
+            if self.asset_syncer is not None
+            else self.store.layout.root
+        )
+        dataset_path = Path(
+            str(
+                config.get("datasetPath")
+                or fallback_manifest.get("datasetPath")
+                or template.get("dataset_ref")
+                or ""
+            )
+        ).expanduser()
+        bitfun_cli_path = Path(
+            str(
+                config.get("bitfunCliPath")
+                or fallback_manifest.get("bitfunCliPath")
+                or ""
+            )
+        ).expanduser()
+        bitfun_config_dir = Path(
+            str(
+                config.get("bitfunConfigDir")
+                or fallback_manifest.get("bitfunConfigDir")
+                or ""
+            )
+        ).expanduser()
+        submitted_executor_config = config.get("executorConfig")
+        if submitted_executor_config is None:
+            submitted_executor_config = {}
+        elif not isinstance(submitted_executor_config, dict):
+            raise RerunValidationError(400, "executorConfig must be an object")
+        body_config = self._filter_worker_maps(
+            {
+                **existing_executor_config,
+                **submitted_executor_config,
+            },
+            list(worker_shards.keys()),
+        )
+        self._validate_executor_config(body_config)
+        try:
+            validate_create_task_assets(
+                dataset_path=dataset_path,
+                bitfun_cli_path=bitfun_cli_path,
+                bitfun_config_dir=bitfun_config_dir,
+                case_ids=all_case_ids,
+                workers=self.store.list_workers(),
+                worker_ids=list(worker_shards.keys()),
+                controller_shared_root=controller_root,
+            )
+        except RuntimeError as exc:
+            raise RerunValidationError(400, str(exc)) from exc
 
     def _apply_config(
         self,

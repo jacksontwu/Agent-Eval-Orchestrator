@@ -1702,7 +1702,8 @@ INDEX_HTML = """<!doctype html>
       modalState.error = "";
       renderRerunConfigModal();
       try {
-        await api("/api/runs/" + encodeURIComponent(modalState.runId) + "/rerun-exceptions", {
+        const originalRunId = modalState.runId;
+        const result = await api("/api/runs/" + encodeURIComponent(originalRunId) + "/rerun-exceptions", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
@@ -1710,10 +1711,14 @@ INDEX_HTML = """<!doctype html>
             selectedErrorTypes: modalState.selectedErrorTypes || [],
           }),
         });
+        const rerunRunId = result.runId || originalRunId;
         closeRerunConfigModal();
         if (state.rerunPollTimer) clearInterval(state.rerunPollTimer);
-        state.rerunPollTimer = setInterval(() => pollRerunJob(modalState.runId), 2500);
-        await pollRerunJob(modalState.runId);
+        state.rerunPollTimer = setInterval(() => pollRerunJob(rerunRunId), 2500);
+        await pollRerunJob(rerunRunId);
+        if (result.runId && result.runId !== originalRunId) {
+          await loadTaskDetail(result.runId);
+        }
       } catch (error) {
         if (state.rerunConfig) {
           state.rerunConfig.submitting = false;

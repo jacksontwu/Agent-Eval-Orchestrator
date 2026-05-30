@@ -649,7 +649,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = self.store.get_run_rerun_job(str(run["rerun_job_id"]))
             rerun_batches = []
             if job:
-                for worker_id, batch_id in (job.get("rerun_batches") or {}).items():
+                for worker_id, batch_id in self.store.iter_run_rerun_batch_ids(job):
                     batch = self.store.get_batch(str(batch_id))
                     if batch:
                         rerun_batches.append(

@@ -140,20 +140,29 @@ def test_post_rerun_exceptions_accepts_config_body(store, tmp_path):
     assert resp.status == 201
     payload = json.loads(resp.read().decode("utf-8"))
     assert payload["exceptionCount"] == 1
-    template = store.get_task_template(run["template_id"])
+    assert payload["runId"] != run["run_id"]
+    assert payload["parentRunId"] == run["run_id"]
+    original_template = store.get_task_template(run["template_id"])
+    assert original_template["dataset_ref"] == "/tmp/dataset"
+    derived_run = store.get_run(payload["runId"])
+    assert derived_run["parent_run_id"] == run["run_id"]
+    template = store.get_task_template(derived_run["template_id"])
     assert template["dataset_ref"] == assets["datasetPath"]
     executor_config = template["executor_config"]
     assert executor_config["nConcurrent"] == 2
     assert executor_config["combinedJobsDir"] == assets["jobsDir"]
     updated_run = store.get_run(run["run_id"])
-    manifest = updated_run["sync_manifest"]
+    assert updated_run["sync_manifest"]["datasetPath"] == "/tmp/old-dataset"
+    manifest = derived_run["sync_manifest"]
     assert manifest["datasetPath"] == assets["datasetPath"]
     assert manifest["bitfunCliPath"] == assets["bitfunCliPath"]
     assert manifest["bitfunConfigDir"] == assets["bitfunConfigDir"]
-    assert manifest["workers"]["worker-a"]["targetRoot"] == previous_target
+    assert manifest["workers"]["worker-a"]["targetRoot"] != previous_target
     assert manifest["workers"]["worker-a"]["transport"] == "local"
     job = store.get_run_rerun_job(payload["rerunJobId"])
+    assert job["run_id"] == payload["runId"]
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["run_id"] == payload["runId"]
     assert rerun_batch["batch_options"]["concurrency"] == 2
     server.shutdown()
 
@@ -187,6 +196,10 @@ def test_post_rerun_exceptions_rejects_invalid_config_without_job(store, tmp_pat
     assert resp.status == 400
     assert "datasetPath" in payload["error"]
     assert store.get_active_run_rerun_job(run["run_id"]) is None
+    assert [
+        item for item in store.list_runs()
+        if item.get("parent_run_id") == run["run_id"]
+    ] == []
     server.shutdown()
 
 
@@ -248,6 +261,59 @@ def test_post_rerun_exceptions_rejects_active_rerun(store, tmp_path):
     )
     resp = conn.getresponse()
     assert resp.status == 409
+    server.shutdown()
+
+
+def test_get_rerun_status_includes_list_valued_rerun_batches(store, tmp_path):
+    run, parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    rerun_a = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["exc-a"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="running",
+        batch_kind="exception_rerun",
+        parent_batch_id=parent["batch_id"],
+    )
+    rerun_b = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["exc-b"],
+        preferred_worker_id="worker-a",
+        batch_options={},
+        initial_status="pending_sync",
+        batch_kind="exception_rerun",
+        parent_batch_id=parent["batch_id"],
+    )
+    store.create_run_rerun_job(
+        job_id="rerun-list",
+        run_id=run["run_id"],
+        case_ids=["exc-a", "exc-b"],
+        worker_shards={"worker-a": ["exc-a", "exc-b"]},
+        rerun_batches={"worker-a": [rerun_a["batch_id"], rerun_b["batch_id"]]},
+    )
+    store.update_run_rerun_fields(
+        run_id=run["run_id"],
+        rerun_status="running",
+        rerun_job_id="rerun-list",
+    )
+    server = start_test_server(store, tmp_path, 9899)
+    conn = HTTPConnection("127.0.0.1", 9899)
+    conn.request(
+        "GET",
+        f"/api/runs/{run['run_id']}/rerun",
+        headers={"X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    assert resp.status == 200
+    assert [item["batchId"] for item in payload["rerunBatches"]] == [
+        rerun_a["batch_id"],
+        rerun_b["batch_id"],
+    ]
+    assert {item["workerId"] for item in payload["rerunBatches"]} == {"worker-a"}
     server.shutdown()
 
 

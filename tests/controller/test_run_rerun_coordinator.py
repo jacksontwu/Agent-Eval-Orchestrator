@@ -12,6 +12,13 @@ def coordinator(store):
     return RunRerunCoordinator(store=store, asset_syncer=None)
 
 
+def _derived_runs_for_parent(store, parent_run_id):
+    return [
+        item for item in store.list_runs()
+        if item.get("parent_run_id") == parent_run_id
+    ]
+
+
 def test_start_rerun_rejects_unfinished_run(coordinator, store):
     template = store.create_task_template(
         owner="default",
@@ -71,6 +78,21 @@ def test_start_rerun_creates_batches_and_job(coordinator, store):
     assert rerun_batch["parent_batch_id"] == derived_primary[0]["batch_id"]
     assert rerun_batch["status"] == "pending_sync"
     assert rerun_batch["selected_case_ids"] == ["exc-a"]
+
+
+def test_start_rerun_rejects_legacy_active_status_on_original_run(coordinator, store):
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    store.update_run_rerun_fields(run_id=run["run_id"], rerun_status="running")
+
+    with pytest.raises(RerunValidationError) as exc:
+        coordinator.start_rerun(run["run_id"])
+
+    assert exc.value.code == 409
+    assert "already in progress" in exc.value.message
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
 
 
 def test_start_rerun_creates_derived_run_and_leaves_original_unchanged(store, tmp_path):
@@ -370,6 +392,7 @@ def test_start_rerun_config_validation_happens_before_job_creation(store, tmp_pa
     assert exc.value.code == 400
     assert "case directory not found: exc-a" in exc.value.message
     assert store.get_active_run_rerun_job(run["run_id"]) is None
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
     assert store.get_task_template(run["template_id"])["dataset_ref"] == original_template["dataset_ref"]
 
 
@@ -445,6 +468,7 @@ def test_start_rerun_rejects_malformed_executor_config_before_job_creation(store
     assert exc.value.code == 400
     assert exc.value.message == "executorConfig must be an object"
     assert store.get_active_run_rerun_job(run["run_id"]) is None
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
 
     with pytest.raises(RerunValidationError) as exc:
         coordinator.start_rerun(
@@ -461,6 +485,7 @@ def test_start_rerun_rejects_malformed_executor_config_before_job_creation(store
     assert exc.value.code == 400
     assert exc.value.message == "executorConfig must be an object"
     assert store.get_active_run_rerun_job(run["run_id"]) is None
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
 
 
 def test_start_rerun_rejects_invalid_executor_numbers_before_job_creation(store, tmp_path):
@@ -490,6 +515,7 @@ def test_start_rerun_rejects_invalid_executor_numbers_before_job_creation(store,
     assert exc.value.code == 400
     assert exc.value.message == "executorConfig.nConcurrent must be a positive integer"
     assert store.get_active_run_rerun_job(run["run_id"]) is None
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
 
     with pytest.raises(RerunValidationError) as exc:
         coordinator.start_rerun(
@@ -509,6 +535,7 @@ def test_start_rerun_rejects_invalid_executor_numbers_before_job_creation(store,
     assert exc.value.code == 400
     assert exc.value.message == "executorConfig.timeoutMultiplier must be a positive number"
     assert store.get_active_run_rerun_job(run["run_id"]) is None
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
 
     with pytest.raises(RerunValidationError) as exc:
         coordinator.start_rerun(
@@ -528,6 +555,7 @@ def test_start_rerun_rejects_invalid_executor_numbers_before_job_creation(store,
     assert exc.value.code == 400
     assert exc.value.message == "executorConfig.nConcurrent must be a positive integer"
     assert store.get_active_run_rerun_job(run["run_id"]) is None
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
 
 
 def test_start_rerun_empty_executor_config_preserves_existing_behavior(store):

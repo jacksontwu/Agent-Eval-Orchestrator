@@ -761,12 +761,9 @@ class Store:
         job = self.get_run_rerun_job(str(run["rerun_job_id"]))
         if not job:
             return
-        rerun_batch_ids: list[str] = []
-        for value in job["rerun_batches"].values():
-            if isinstance(value, list):
-                rerun_batch_ids.extend(str(batch_id) for batch_id in value)
-            else:
-                rerun_batch_ids.append(str(value))
+        rerun_batch_ids = [
+            batch_id for _worker_id, batch_id in self.iter_run_rerun_batch_ids(job)
+        ]
         statuses = []
         for batch_id in rerun_batch_ids:
             item = self.get_batch(batch_id)
@@ -777,6 +774,15 @@ class Store:
         final_status = "failed" if any(status in {"failed", "sync_failed", "stopped"} for status in statuses) else "succeeded"
         self.update_run_rerun_fields(run_id=run_id, rerun_status=final_status)
         self.update_run_rerun_job(str(job["job_id"]), status=final_status, finished=True)
+
+    def iter_run_rerun_batch_ids(self, job: dict[str, Any]) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        for worker_id, value in (job.get("rerun_batches") or {}).items():
+            if isinstance(value, list):
+                pairs.extend((str(worker_id), str(batch_id)) for batch_id in value)
+            elif value:
+                pairs.append((str(worker_id), str(value)))
+        return pairs
 
     def create_batch(
         self,
@@ -2236,10 +2242,16 @@ class Store:
             merged_jobs_dir=merged_jobs_dir,
         )
         rerun_status = str(run.get("rerun_status") or "idle")
+        active_derived_rerun = (
+            False
+            if run.get("parent_run_id")
+            else bool(self.list_active_derived_reruns(run_id))
+        )
         can_rerun = (
             self.is_run_primary_terminal(run_id)
             and exception_count > 0
             and rerun_status not in {"syncing", "running"}
+            and not active_derived_rerun
         )
         return {
             "run": run,

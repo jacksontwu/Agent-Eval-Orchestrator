@@ -213,6 +213,48 @@ def test_create_run_rerun_job_persists_selected_error_types(store):
     assert fetched["selected_error_types"] == ["TimeoutError", "OtherError"]
 
 
+def test_iter_run_rerun_batch_ids_handles_scalar_and_list_values(store):
+    pairs = store.iter_run_rerun_batch_ids(
+        {
+            "rerun_batches": {
+                "worker-a": "batch-a",
+                "worker-b": ["batch-b1", "batch-b2"],
+                "worker-c": "",
+                "worker-d": None,
+            }
+        }
+    )
+
+    assert pairs == [
+        ("worker-a", "batch-a"),
+        ("worker-b", "batch-b1"),
+        ("worker-b", "batch-b2"),
+    ]
+
+
+def test_eval_task_detail_disables_rerun_when_parent_has_active_derived_rerun(store):
+    run, _ = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "exc-a", "status": "errored", "error_text": "boom"}],
+    )
+    child_template = store.clone_task_template(run["template_id"], name="child")
+    child_run = store.create_run(
+        template_id=child_template["template_id"],
+        display_name="child rerun",
+        parent_run_id=run["run_id"],
+    )
+    store.update_run_rerun_fields(
+        run_id=child_run["run_id"],
+        rerun_status="syncing",
+    )
+
+    parent_detail = store.get_eval_task_detail(run["run_id"])
+    child_detail = store.get_eval_task_detail(child_run["run_id"])
+
+    assert parent_detail["canRerunExceptions"] is False
+    assert child_detail["canRerunExceptions"] is False
+
+
 def test_finish_rerun_batch_handles_multiple_batches_per_worker(store):
     template = store.create_task_template(
         owner="default",
