@@ -192,6 +192,10 @@ def pick_rerun_batch(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return ordered[0]
 
 
+def order_rerun_batches(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(rows, key=lambda item: str(item.get("created_at") or ""))
+
+
 def fetch_controller_task(controller_url: str, auth_token: str, run_id: str) -> dict[str, Any] | None:
     url = f"{controller_url.rstrip('/')}/api/dashboard/tasks"
     headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
@@ -277,7 +281,8 @@ def load_run_plan(db_path: Path, run_id: str) -> dict[str, Any]:
         worker = workers.get(worker_id)
         if not worker:
             raise SystemExit(f"worker not registered: {worker_id}")
-        rerun_batch = pick_rerun_batch(reruns_by_parent.get(str(batch_item["batch_id"]), []))
+        rerun_batches = order_rerun_batches(reruns_by_parent.get(str(batch_item["batch_id"]), []))
+        rerun_batch = pick_rerun_batch(rerun_batches)
         primary_batches.append(
             {
                 "batch_id": str(batch_item["batch_id"]),
@@ -287,6 +292,7 @@ def load_run_plan(db_path: Path, run_id: str) -> dict[str, Any]:
                 "worker": worker,
                 "expected_case_ids": list(batch_item["selected_case_ids"]),
                 "expected_cases": len(batch_item["selected_case_ids"]),
+                "rerun_batches": rerun_batches,
                 "rerun_batch": rerun_batch,
             }
         )
@@ -476,6 +482,51 @@ def merge_effective_cases(
     return merged
 
 
+def merge_effective_cases_from_reruns(
+    *,
+    expected_case_ids: list[str],
+    primary_cases: dict[str, dict[str, Any]],
+    rerun_infos: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for case_id in expected_case_ids:
+        primary_entry = lookup_case_entry(case_id, primary_cases)
+        if primary_entry:
+            merged[case_id] = {**primary_entry, "source": "primary"}
+        else:
+            merged[case_id] = {
+                "status": "pending",
+                "scored": None,
+                "has_result": False,
+                "source": "primary",
+            }
+
+    for rerun_info in sorted(rerun_infos, key=lambda item: str(item.get("created_at") or "")):
+        rerun_case_ids = list(rerun_info.get("rerun_case_ids") or [])
+        rerun_cases = ((rerun_info.get("stats") or {}).get("cases") or {})
+        batch_id = str(rerun_info.get("batch_id") or "")
+        batch_status = str(rerun_info.get("batch_status") or "")
+        for case_id in expected_case_ids:
+            if not any(case_ids_match(case_id, rerun_case_id) for rerun_case_id in rerun_case_ids):
+                continue
+            rerun_entry = lookup_case_entry(case_id, rerun_cases)
+            if rerun_entry:
+                merged[case_id] = {
+                    **rerun_entry,
+                    "source": "exception_rerun",
+                    "source_batch_id": batch_id,
+                }
+            elif batch_status in ACTIVE_RERUN_STATUSES:
+                merged[case_id] = {
+                    "status": "pending",
+                    "scored": None,
+                    "has_result": False,
+                    "source": "exception_rerun",
+                    "source_batch_id": batch_id,
+                }
+    return merged
+
+
 def aggregate_worker_rows(rows: list[dict[str, Any]], *, key: str = "stats") -> dict[str, Any]:
     totals = Counter()
     status_counts: Counter[str] = Counter()
@@ -531,61 +582,68 @@ def collect_run_stats(
     for item in plan["primary_batches"]:
         worker = item["worker"]
         shared_root = worker_shared_root(worker)
+        rerun_batches = list(item.get("rerun_batches") or [])
         rerun_batch = item.get("rerun_batch")
 
         if active_exception_only:
-            if not is_active_rerun_batch(rerun_batch):
+            active_rerun_batches = [batch for batch in rerun_batches if is_active_rerun_batch(batch)]
+            if not active_rerun_batches and is_active_rerun_batch(rerun_batch):
+                active_rerun_batches = [rerun_batch]
+            if not active_rerun_batches:
                 continue
-            rerun_batch_id = str(rerun_batch["batch_id"])
-            rerun_job_dir = remote_job_dir(
-                shared_root=shared_root,
-                owner=item["owner"],
-                run_id=run_id,
-                batch_id=rerun_batch_id,
-            )
-            try:
-                rerun_stats = ssh_analyze_job(
-                    worker=worker,
-                    job_dir=rerun_job_dir,
-                    ssh_config=ssh_config,
-                    ssh_user=ssh_user,
-                    ssh_key=ssh_key,
-                    connect_timeout_sec=connect_timeout_sec,
+            for active_rerun_batch in active_rerun_batches:
+                rerun_batch_id = str(active_rerun_batch["batch_id"])
+                rerun_job_dir = remote_job_dir(
+                    shared_root=shared_root,
+                    owner=item["owner"],
+                    run_id=run_id,
+                    batch_id=rerun_batch_id,
                 )
-            except Exception as exc:
-                errors.append(
+                try:
+                    rerun_stats = ssh_analyze_job(
+                        worker=worker,
+                        job_dir=rerun_job_dir,
+                        ssh_config=ssh_config,
+                        ssh_user=ssh_user,
+                        ssh_key=ssh_key,
+                        connect_timeout_sec=connect_timeout_sec,
+                    )
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "worker_id": item["worker_id"],
+                            "batch_id": rerun_batch_id,
+                            "phase": "exception_rerun",
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+
+                rerun_case_ids = list(active_rerun_batch["selected_case_ids"])
+                rerun_info = {
+                    "batch_id": rerun_batch_id,
+                    "parent_batch_id": item["batch_id"],
+                    "batch_status": str(active_rerun_batch.get("status") or ""),
+                    "created_at": str(active_rerun_batch.get("created_at") or ""),
+                    "rerun_case_ids": rerun_case_ids,
+                    "rerun_case_count": len(rerun_case_ids),
+                    "stats": rerun_stats,
+                }
+                chosen_stats = summarize_case_map(rerun_case_ids, rerun_stats.get("cases") or {})
+                worker_rows.append(
                     {
                         "worker_id": item["worker_id"],
+                        "primary_batch_id": item["batch_id"],
                         "batch_id": rerun_batch_id,
-                        "phase": "exception_rerun",
-                        "error": str(exc),
+                        "expected_cases": len(rerun_case_ids),
+                        "primary": None,
+                        "exception_rerun": rerun_info,
+                        "exception_reruns": [rerun_info],
+                        "effective": chosen_stats,
+                        "stats": chosen_stats,
+                        **chosen_stats,
                     }
                 )
-                continue
-
-            rerun_case_ids = list(rerun_batch["selected_case_ids"])
-            rerun_info = {
-                "batch_id": rerun_batch_id,
-                "parent_batch_id": item["batch_id"],
-                "batch_status": str(rerun_batch.get("status") or ""),
-                "rerun_case_ids": rerun_case_ids,
-                "rerun_case_count": len(rerun_case_ids),
-                "stats": rerun_stats,
-            }
-            chosen_stats = summarize_case_map(rerun_case_ids, rerun_stats.get("cases") or {})
-            worker_rows.append(
-                {
-                    "worker_id": item["worker_id"],
-                    "primary_batch_id": item["batch_id"],
-                    "batch_id": rerun_batch_id,
-                    "expected_cases": len(rerun_case_ids),
-                    "primary": None,
-                    "exception_rerun": rerun_info,
-                    "effective": chosen_stats,
-                    "stats": chosen_stats,
-                    **chosen_stats,
-                }
-            )
             continue
 
         primary_job_dir = remote_job_dir(
@@ -613,9 +671,46 @@ def collect_run_stats(
             )
             continue
 
-        rerun_info = None
-        rerun_stats = None
-        if rerun_batch and not primary_only:
+        rerun_infos: list[dict[str, Any]] = []
+        if rerun_batches and not primary_only:
+            for rerun_batch_item in rerun_batches:
+                rerun_batch_id = str(rerun_batch_item["batch_id"])
+                rerun_job_dir = remote_job_dir(
+                    shared_root=shared_root,
+                    owner=item["owner"],
+                    run_id=run_id,
+                    batch_id=rerun_batch_id,
+                )
+                try:
+                    rerun_stats = ssh_analyze_job(
+                        worker=worker,
+                        job_dir=rerun_job_dir,
+                        ssh_config=ssh_config,
+                        ssh_user=ssh_user,
+                        ssh_key=ssh_key,
+                        connect_timeout_sec=connect_timeout_sec,
+                    )
+                    rerun_infos.append(
+                        {
+                            "batch_id": rerun_batch_id,
+                            "parent_batch_id": item["batch_id"],
+                            "batch_status": str(rerun_batch_item.get("status") or ""),
+                            "created_at": str(rerun_batch_item.get("created_at") or ""),
+                            "rerun_case_ids": list(rerun_batch_item["selected_case_ids"]),
+                            "rerun_case_count": len(rerun_batch_item["selected_case_ids"]),
+                            "stats": rerun_stats,
+                        }
+                    )
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "worker_id": item["worker_id"],
+                            "batch_id": rerun_batch_id,
+                            "phase": "exception_rerun",
+                            "error": str(exc),
+                        }
+                    )
+        elif rerun_batch and not primary_only:
             rerun_batch_id = str(rerun_batch["batch_id"])
             rerun_job_dir = remote_job_dir(
                 shared_root=shared_root,
@@ -632,14 +727,17 @@ def collect_run_stats(
                     ssh_key=ssh_key,
                     connect_timeout_sec=connect_timeout_sec,
                 )
-                rerun_info = {
-                    "batch_id": rerun_batch_id,
-                    "parent_batch_id": item["batch_id"],
-                    "batch_status": str(rerun_batch.get("status") or ""),
-                    "rerun_case_ids": list(rerun_batch["selected_case_ids"]),
-                    "rerun_case_count": len(rerun_batch["selected_case_ids"]),
-                    "stats": rerun_stats,
-                }
+                rerun_infos.append(
+                    {
+                        "batch_id": rerun_batch_id,
+                        "parent_batch_id": item["batch_id"],
+                        "batch_status": str(rerun_batch.get("status") or ""),
+                        "created_at": str(rerun_batch.get("created_at") or ""),
+                        "rerun_case_ids": list(rerun_batch["selected_case_ids"]),
+                        "rerun_case_count": len(rerun_batch["selected_case_ids"]),
+                        "stats": rerun_stats,
+                    }
+                )
             except Exception as exc:
                 errors.append(
                     {
@@ -650,14 +748,14 @@ def collect_run_stats(
                     }
                 )
 
-        effective_cases = merge_effective_cases(
+        effective_cases = merge_effective_cases_from_reruns(
             expected_case_ids=item["expected_case_ids"],
             primary_cases=primary_stats.get("cases") or {},
-            rerun_cases=(rerun_stats or {}).get("cases") if rerun_stats else None,
-            rerun_case_ids=list((rerun_batch or {}).get("selected_case_ids") or []),
+            rerun_infos=rerun_infos,
         )
         effective_stats = summarize_case_map(item["expected_case_ids"], effective_cases)
         chosen_stats = primary_stats if primary_only else effective_stats
+        rerun_info = rerun_infos[-1] if rerun_infos else None
 
         worker_rows.append(
             {
@@ -667,6 +765,7 @@ def collect_run_stats(
                 "expected_cases": item["expected_cases"],
                 "primary": primary_stats,
                 "exception_rerun": rerun_info,
+                "exception_reruns": rerun_infos,
                 "effective": effective_stats,
                 "stats": chosen_stats,
                 **chosen_stats,
@@ -680,7 +779,11 @@ def collect_run_stats(
     else:
         overall_primary = aggregate_worker_rows(worker_rows, key="primary")
         overall_effective = aggregate_worker_rows(worker_rows, key="effective") if not primary_only else overall_primary
-        rerun_rows = [row["exception_rerun"]["stats"] for row in worker_rows if row.get("exception_rerun")]
+        rerun_rows = [
+            rerun_info["stats"]
+            for row in worker_rows
+            for rerun_info in (row.get("exception_reruns") or ([row["exception_rerun"]] if row.get("exception_rerun") else []))
+        ]
         overall_rerun = aggregate_worker_rows(
             [{"stats": stats} for stats in rerun_rows],
             key="stats",
@@ -810,11 +913,15 @@ def print_human_report(payload: dict[str, Any]) -> None:
             f"pending={stats.get('pending', 0)} errored={stats.get('errored', 0)} "
             f"scored={scored} not_scored={not_scored}"
         )
-        if rerun_info and not active_exception_only:
-            harbor_stats = rerun_info.get("stats") or {}
+        rerun_infos = list(row.get("exception_reruns") or ([rerun_info] if rerun_info else []))
+        if rerun_infos and not active_exception_only:
+            label = "rerun" if len(rerun_infos) == 1 else "reruns"
+            print(f"      {label}: {len(rerun_infos)} batch(es)")
+        for rerun_item in rerun_infos:
+            harbor_stats = rerun_item.get("stats") or {}
             print(
-                f"      rerun batch={rerun_info['batch_id']} status={rerun_info['batch_status']} "
-                f"cases={rerun_info['rerun_case_count']} "
+                f"        batch={rerun_item['batch_id']} status={rerun_item['batch_status']} "
+                f"cases={rerun_item['rerun_case_count']} "
                 f"harbor trials: completed={harbor_stats.get('completed', 0)} "
                 f"running={harbor_stats.get('running', 0)} "
                 f"pending={harbor_stats.get('pending', 0)}"
