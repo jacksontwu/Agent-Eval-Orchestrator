@@ -45,7 +45,7 @@ def test_start_rerun_rejects_unfinished_run(coordinator, store):
 
 
 def test_start_rerun_creates_batches_and_job(coordinator, store):
-    run, parent = seed_finished_run_with_cases(
+    run, _parent = seed_finished_run_with_cases(
         store,
         cases=[
             {"case_id": "exc-a", "status": "errored", "error_text": "boom"},
@@ -55,16 +55,67 @@ def test_start_rerun_creates_batches_and_job(coordinator, store):
     result = coordinator.start_rerun(run["run_id"])
     assert result["exceptionCount"] == 1
     assert result["rerunStatus"] == "syncing"
-    updated = store.get_run(run["run_id"])
+    updated = store.get_run(result["runId"])
     assert updated["rerun_status"] == "syncing"
     job = store.get_run_rerun_job(result["rerunJobId"])
     assert job is not None
+    assert job["run_id"] == result["runId"]
     assert job["rerun_batches"]["worker-a"]
+    derived_primary = [
+        batch for batch in store.list_batches_for_run(result["runId"])
+        if batch["batch_kind"] == "primary"
+    ]
+    assert len(derived_primary) == 1
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
     assert rerun_batch["batch_kind"] == "exception_rerun"
-    assert rerun_batch["parent_batch_id"] == parent["batch_id"]
+    assert rerun_batch["parent_batch_id"] == derived_primary[0]["batch_id"]
     assert rerun_batch["status"] == "pending_sync"
     assert rerun_batch["selected_case_ids"] == ["exc-a"]
+
+
+def test_start_rerun_creates_derived_run_and_leaves_original_unchanged(store, tmp_path):
+    run, parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": "exc-a",
+                "status": "errored",
+                "error_text": "boom",
+                "artifact_index": {"trialDir": "/tmp/jobs/old/exc-a__old"},
+            },
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    original_run_before = store.get_run(run["run_id"])
+    original_template_before = store.get_task_template(run["template_id"])
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    result = coordinator.start_rerun(run["run_id"])
+
+    assert result["parentRunId"] == run["run_id"]
+    assert result["runId"] != run["run_id"]
+    original_run_after = store.get_run(run["run_id"])
+    original_template_after = store.get_task_template(run["template_id"])
+    assert original_run_after["rerun_status"] == original_run_before["rerun_status"]
+    assert original_run_after["rerun_job_id"] == original_run_before["rerun_job_id"]
+    assert original_template_after == original_template_before
+
+    derived_run = store.get_run(result["runId"])
+    assert derived_run["parent_run_id"] == run["run_id"]
+    assert derived_run["rerun_status"] == "syncing"
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    assert job["run_id"] == derived_run["run_id"]
+
+    derived_primary = [
+        batch for batch in store.list_batches_for_run(derived_run["run_id"])
+        if batch["batch_kind"] == "primary"
+    ]
+    assert len(derived_primary) == 1
+    assert store.list_case_runs(derived_primary[0]["batch_id"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["run_id"] == derived_run["run_id"]
+    assert rerun_batch["parent_batch_id"] == derived_primary[0]["batch_id"]
+    assert rerun_batch["parent_batch_id"] != parent["batch_id"]
 
 
 def test_start_rerun_rejects_no_exceptions(coordinator, store):

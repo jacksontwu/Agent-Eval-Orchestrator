@@ -427,6 +427,27 @@ class Store:
             ).fetchone()
         return self._template_item(row)
 
+    def clone_task_template(
+        self,
+        template_id: str,
+        *,
+        name: str | None = None,
+        executor_config: dict[str, Any] | None = None,
+        dataset_ref: str | None = None,
+    ) -> dict[str, Any]:
+        template = self.get_task_template(template_id)
+        if not template:
+            raise RuntimeError("template not found")
+        return self.create_task_template(
+            owner=str(template["owner"]),
+            name=name or f"{template['name']} rerun",
+            dataset_ref=dataset_ref or str(template["dataset_ref"]),
+            executor_kind=str(template["executor_kind"]),
+            executor_config=executor_config if executor_config is not None else dict(template["executor_config"] or {}),
+            model_profile_ref=template.get("model_profile_ref"),
+            note=str(template.get("note") or ""),
+        )
+
     def list_task_templates(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(

@@ -34,8 +34,7 @@ class RunRerunCoordinator:
             raise RerunValidationError(404, "run not found")
         if not self.store.is_run_primary_terminal(run_id):
             raise RerunValidationError(409, "run not finished")
-        rerun_status = str(run.get("rerun_status") or "idle")
-        if rerun_status in {"syncing", "running"}:
+        if self.store.list_active_derived_reruns(run_id):
             raise RerunValidationError(409, "rerun already in progress")
         selected_error_types = self._resolve_selected_error_types(run_id=run_id, config=config)
         if not selected_error_types:
@@ -49,11 +48,13 @@ class RunRerunCoordinator:
         if not grouped:
             raise RerunValidationError(400, "no exception cases")
 
-        template = self.store.get_task_template(str(run["template_id"]))
+        source_template = self.store.get_task_template(str(run["template_id"]))
+        if not source_template:
+            raise RerunValidationError(404, "task template not found")
         existing_manifest = dict(run.get("sync_manifest") or {})
         dataset_path = self._resolve_dataset_path(
             config=config,
-            template=template,
+            template=source_template,
             existing_manifest=existing_manifest,
         )
         worker_shards = self._resolve_worker_shards(grouped, dataset_path)
@@ -64,26 +65,39 @@ class RunRerunCoordinator:
         ]
         asset_config = self._filter_config_for_assets(dict(config or {}))
         config_supplied = self._has_applicable_config(asset_config)
+        derived_template = self.store.clone_task_template(
+            str(source_template["template_id"]),
+            name=f"{source_template['name']} rerun",
+        )
+        derived_run = self.store.create_run(
+            template_id=str(derived_template["template_id"]),
+            display_name=f"{run['display_name']} rerun",
+            parent_run_id=run_id,
+        )
         rerun_concurrency: int | None = None
         if config_supplied:
             rerun_concurrency = self._apply_config(
-                run=run,
+                run=derived_run,
                 config=dict(asset_config or {}),
                 worker_shards=worker_shards,
                 all_case_ids=all_case_ids,
             )
 
+        cloned_batch_ids = self.store.clone_primary_batches_to_run(
+            source_run_id=run_id,
+            target_run_id=str(derived_run["run_id"]),
+        )
         job_id = new_id("rerun")
         rerun_batches: dict[str, str] = {}
         for worker_id, items in grouped.items():
             case_ids = worker_shards[worker_id]
-            parent_batch_id = str(items[0]["parent_batch_id"])
+            parent_batch_id = cloned_batch_ids[str(items[0]["parent_batch_id"])]
             parent = self.store.get_batch(parent_batch_id)
             batch_options = dict((parent or {}).get("batch_options") or {})
             if rerun_concurrency is not None:
                 batch_options["concurrency"] = rerun_concurrency
             batch = self.store.create_batch(
-                run_id=run_id,
+                run_id=str(derived_run["run_id"]),
                 selected_case_ids=case_ids,
                 preferred_worker_id=worker_id,
                 batch_options=batch_options,
@@ -95,21 +109,23 @@ class RunRerunCoordinator:
 
         self.store.create_run_rerun_job(
             job_id=job_id,
-            run_id=run_id,
+            run_id=str(derived_run["run_id"]),
             case_ids=all_case_ids,
             worker_shards=worker_shards,
             rerun_batches=rerun_batches,
             selected_error_types=selected_error_types,
         )
         self.store.update_run_rerun_fields(
-            run_id=run_id,
+            run_id=str(derived_run["run_id"]),
             rerun_status="syncing",
             rerun_job_id=job_id,
         )
         if self.asset_syncer is not None:
-            self.asset_syncer.start_rerun_sync_async(job_id=job_id, run_id=run_id)
+            self.asset_syncer.start_rerun_sync_async(job_id=job_id, run_id=str(derived_run["run_id"]))
 
         return {
+            "runId": str(derived_run["run_id"]),
+            "parentRunId": run_id,
             "rerunJobId": job_id,
             "rerunStatus": "syncing",
             "exceptionCount": len(all_case_ids),
