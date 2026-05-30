@@ -708,6 +708,11 @@ def test_start_rerun_empty_executor_config_preserves_existing_behavior(store):
     template = store.get_task_template(run["template_id"])
     assert template["dataset_ref"] == original_template["dataset_ref"]
     assert template["executor_config"] == original_template["executor_config"]
+    derived_run = store.get_run(result["runId"])
+    derived_template = store.get_task_template(derived_run["template_id"])
+    assert derived_template["executor_config"]["combinedJobsDir"] == str(
+        derived_jobs_dir_for_run(store=store, run=derived_run)
+    )
     job = store.get_run_rerun_job(result["rerunJobId"])
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
     assert rerun_batch["batch_options"] == parent["batch_options"]
