@@ -981,7 +981,8 @@ INDEX_HTML = """<!doctype html>
       document.getElementById("workersView").classList.toggle("hidden", tab !== "workers");
     }
 
-    async function loadDashboard() {
+    async function loadDashboard(options) {
+      const refreshTaskDetail = !options || options.refreshTaskDetail !== false;
       const [tasksPayload, workersPayload, workerRuntimePayload] = await Promise.all([
         api("/api/dashboard/tasks"),
         api("/api/workers"),
@@ -1007,7 +1008,7 @@ INDEX_HTML = """<!doctype html>
       renderCreateWorkerConfigs();
       renderDatasetOptions();
       renderCreateResult();
-      if (state.selectedTaskId) {
+      if (refreshTaskDetail && state.selectedTaskId) {
         await loadTaskDetail(state.selectedTaskId);
       }
       if (state.selectedWorkerId) {
@@ -2473,8 +2474,8 @@ INDEX_HTML = """<!doctype html>
     });
 
     setTab(window.location.pathname === "/create" ? "create" : "tasks");
-    loadDashboard();
-    setInterval(loadDashboard, 5000);
+    loadDashboard({ refreshTaskDetail: true });
+    setInterval(() => loadDashboard({ refreshTaskDetail: false }), 5000);
   </script>
 </body>
 </html>
