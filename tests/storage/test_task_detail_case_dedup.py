@@ -92,6 +92,33 @@ def test_eval_task_detail_returns_slim_worker_group_cases(store):
     assert "artifact_index" not in top_level_batch
 
 
+def test_get_case_run_returns_full_case_detail(store):
+    _run, batch = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": "case-a",
+                "status": "succeeded",
+                "score": 1.0,
+                "artifact_index": {
+                    "trialDir": "/tmp/jobs/batch/case-a__old",
+                    "resultPath": "/tmp/jobs/batch/case-a__old/result.json",
+                },
+                "metrics": {
+                    "inputTokens": 12,
+                    "outputTokens": 3,
+                },
+            }
+        ],
+    )
+
+    case = store.get_case_run(batch["batch_id"], "case-a")
+
+    assert case["case_id"] == "case-a"
+    assert case["artifact_index"]["trialDir"] == "/tmp/jobs/batch/case-a__old"
+    assert case["metrics"]["inputTokens"] == 12
+
+
 def test_case_covers_selected_matches_prefix_and_exact_ids(store):
     actual_case = {
         "case_id": "instance_tutao__tutanota-fb32e5f",

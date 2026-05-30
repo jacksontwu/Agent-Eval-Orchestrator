@@ -2493,6 +2493,15 @@ class Store:
             ).fetchall()
         return [self._case_item(row) for row in rows]
 
+    def get_case_run(self, batch_id: str, case_id: str) -> dict[str, Any] | None:
+        for case in self.list_case_runs(batch_id):
+            if (
+                str(case.get("case_id") or "") == case_id
+                or str(case.get("original_case_id") or "") == case_id
+            ):
+                return case
+        return None
+
     def _template_item(self, row: sqlite3.Row | None) -> dict[str, Any]:
         item = dict(row)
         item["executor_config"] = json.loads(item.pop("executor_config_json"))

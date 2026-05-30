@@ -151,6 +151,37 @@ def test_post_rerun_exceptions_happy_path(store, tmp_path):
     server.shutdown()
 
 
+def test_get_case_run_returns_lazy_case_detail(store, tmp_path):
+    _run, batch = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": "case-a",
+                "status": "succeeded",
+                "score": 1.0,
+                "artifact_index": {"trialDir": "/tmp/jobs/batch/case-a__old"},
+                "metrics": {"inputTokens": 12},
+            }
+        ],
+    )
+    server = start_test_server(store, tmp_path, 9901)
+    conn = HTTPConnection("127.0.0.1", 9901)
+    conn.request(
+        "GET",
+        f"/api/case-runs?batchId={batch['batch_id']}&caseId=case-a",
+        headers={"X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+
+    assert resp.status == 200
+    payload = json.loads(resp.read().decode("utf-8"))
+    assert payload["case_id"] == "case-a"
+    assert payload["batchId"] == batch["batch_id"]
+    assert payload["artifact_index"]["trialDir"] == "/tmp/jobs/batch/case-a__old"
+    assert payload["metrics"]["inputTokens"] == 12
+    server.shutdown()
+
+
 def test_post_rerun_exceptions_accepts_config_body(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,

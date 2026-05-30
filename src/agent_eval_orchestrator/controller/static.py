@@ -698,6 +698,8 @@ INDEX_HTML = """<!doctype html>
       selectedTaskId: null,
       selectedWorkerId: null,
       taskDetail: null,
+      caseDetails: {},
+      caseDetailLoading: {},
       filePreview: null,
       viewerInfo: null,
       selectedCase: null,
@@ -1120,6 +1122,8 @@ INDEX_HTML = """<!doctype html>
         btn.addEventListener("click", async () => {
           state.selectedTaskId = btn.dataset.taskId;
           state.selectedCase = null;
+          state.caseDetails = {};
+          state.caseDetailLoading = {};
           state.filePreview = null;
           state.viewerInfo = null;
           await loadTaskDetail(state.selectedTaskId);
@@ -1141,6 +1145,32 @@ INDEX_HTML = """<!doctype html>
         state.selectedTaskWorkerId = groups[0] ? groups[0].workerId : null;
       }
       renderTaskDetail();
+    }
+
+    function caseDetailKey(batchId, caseId) {
+      return String(batchId || "") + "::" + String(caseId || "");
+    }
+
+    async function loadCaseDetail(batchId, caseId) {
+      const key = caseDetailKey(batchId, caseId);
+      if (state.caseDetails[key] || state.caseDetailLoading[key]) return;
+      state.caseDetailLoading[key] = true;
+      renderTaskDetail();
+      try {
+        state.caseDetails[key] = await api(
+          "/api/case-runs?batchId=" + encodeURIComponent(batchId) +
+          "&caseId=" + encodeURIComponent(caseId)
+        );
+      } catch (err) {
+        state.caseDetails[key] = {
+          errorText: err.message || String(err),
+          batchId,
+          case_id: caseId,
+        };
+      } finally {
+        delete state.caseDetailLoading[key];
+        renderTaskDetail();
+      }
     }
 
     async function previewFile(path) {
@@ -1308,6 +1338,7 @@ INDEX_HTML = """<!doctype html>
           const batchId = btn.dataset.batchId;
           const caseId = btn.dataset.caseId;
           state.selectedCase = {workerId, batchId, caseId};
+          loadCaseDetail(batchId, caseId);
           renderTaskDetail();
         });
       });
@@ -1338,6 +1369,9 @@ INDEX_HTML = """<!doctype html>
       const selectedCase = selected
         ? cases.find(item => item.batchId === selected.batchId && item.case_id === selected.caseId)
         : null;
+      const selectedKey = selected ? caseDetailKey(selected.batchId, selected.caseId) : "";
+      const selectedCaseDetail = selectedKey ? state.caseDetails[selectedKey] : null;
+      const selectedCaseLoading = selectedKey ? state.caseDetailLoading[selectedKey] : false;
       const caseSucceeded = cases.filter(item => String(item.status || "").toLowerCase() === "succeeded").length;
       const caseFailed = cases.filter(item => String(item.status || "").toLowerCase() === "failed" && !item.error_text).length;
       const caseErrored = cases.filter(item => caseIsErrored(item)).length;
@@ -1360,18 +1394,21 @@ INDEX_HTML = """<!doctype html>
                 '<div class="case-meta">' +
                   '<span>batch: <code>' + esc(item.batchId) + '</code></span>' +
                 '</div>' +
-                (selectedCase && selectedCase.case_id === item.case_id && selectedCase.batchId === item.batchId ? renderSelectedCaseHtml(selectedCase) : '') +
+                (selectedCase && selectedCase.case_id === item.case_id && selectedCase.batchId === item.batchId
+                  ? renderSelectedCaseHtml(selectedCaseDetail || selectedCase, Boolean(selectedCaseLoading))
+                  : '') +
               '</div>'
             ).join("") || '<div class="empty">暂无 case 结果</div>') +
           '</div>' +
         '</div>';
     }
 
-    function renderSelectedCaseHtml(item) {
+    function renderSelectedCaseHtml(item, loading) {
       const artifact = item.artifact_index || {};
       return '' +
         '<div style="margin-top:10px">' +
           '<div class="subtle" style="margin-bottom:6px">Case Detail</div>' +
+          (loading ? '<div class="empty" style="padding:10px 12px;margin-bottom:10px">正在加载 case 详情...</div>' : '') +
           '<div class="detail-grid" style="margin-bottom:10px">' +
             '<div class="stat"><div class="subtle">trial</div><strong><code>' + esc(item.trialName || "-") + '</code></strong></div>' +
             '<div class="stat"><div class="subtle">reward</div><strong>' + esc(item.score == null ? "-" : item.score) + '</strong></div>' +

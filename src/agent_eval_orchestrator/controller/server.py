@@ -539,6 +539,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/task-templates":
             _json_response(self, self.store.list_task_templates())
             return
+        if path == "/api/case-runs":
+            batch_id = str(qs.get("batchId", [""])[0]).strip()
+            case_id = str(qs.get("caseId", [""])[0]).strip()
+            if not batch_id or not case_id:
+                _json_response(self, {"error": "batchId and caseId are required"}, 400)
+                return
+            batch = self.store.get_batch(batch_id)
+            case = self.store.get_case_run(batch_id, case_id)
+            if not batch or not case:
+                _json_response(self, {"error": "case run not found"}, 404)
+                return
+            case["batchId"] = batch_id
+            case["batchStatus"] = batch["status"]
+            _json_response(self, case)
+            return
         if path.startswith("/api/eval-tasks/"):
             run_id = path.split("/")[3]
             detail = self.store.get_eval_task_detail(run_id)
