@@ -40,7 +40,8 @@ def _prepare_assets(tmp_path: Path) -> dict[str, str]:
     bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
     os.chmod(bitfun_cli, 0o755)
     config_dir = tmp_path / "bitfun-config"
-    config_dir.mkdir()
+    (config_dir / "config").mkdir(parents=True)
+    (config_dir / "config" / "app.json").write_text("{}", encoding="utf-8")
     shared = tmp_path / "runtime"
     return {
         "datasetPath": str(dataset),

@@ -28,7 +28,8 @@ def test_build_sync_bind_mounts():
         {
             "type": "bind",
             "source": "/home/djn/worker/agent-eval-orchestrator/runtime/sync/run-abc/bitfun/config",
-            "target": "/root/.config/bitfun",
+            "target": "/root/.config/bitfun/config",
+            "read_only": True,
         },
     ]
 
@@ -47,5 +48,10 @@ def test_build_harbor_bind_mounts():
             "target": "/usr/local/bin/bitfun-cli",
             "read_only": True,
         },
-        {"type": "bind", "source": "/home/djn/.config/bitfun", "target": "/root/.config/bitfun"},
+        {
+            "type": "bind",
+            "source": "/home/djn/.config/bitfun/config",
+            "target": "/root/.config/bitfun/config",
+            "read_only": True,
+        },
     ]

@@ -366,7 +366,8 @@ def _prepare_rerun_assets(tmp_path, case_ids):
     bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
     os.chmod(bitfun_cli, 0o755)
     bitfun_config = tmp_path / "bitfun-config"
-    bitfun_config.mkdir()
+    (bitfun_config / "config").mkdir(parents=True)
+    (bitfun_config / "config" / "app.json").write_text("{}", encoding="utf-8")
     jobs_dir = tmp_path / "harbor" / "jobs"
     return {
         "datasetPath": str(dataset),

@@ -586,7 +586,7 @@ INDEX_HTML = """<!doctype html>
                 <input name="bitfunCliPath" value="/root/projects/BitFun/target/release/bitfun-cli" required />
               </div>
               <div class="field">
-                <label>BitFun Config Dir</label>
+                <label>BitFun Config Root</label>
                 <input name="bitfunConfigDir" value="/root/.config/bitfun" required />
               </div>
               <div class="field">
@@ -1724,7 +1724,7 @@ INDEX_HTML = """<!doctype html>
           '<div class="detail-grid" style="margin-bottom:16px">' +
             '<div class="field"><label>Dataset Path</label><input name="datasetPath" value="' + esc(defaults.datasetPath) + '" required /></div>' +
             '<div class="field"><label>BitFun CLI Path</label><input name="bitfunCliPath" value="' + esc(defaults.bitfunCliPath) + '" required /></div>' +
-            '<div class="field"><label>BitFun Config Dir</label><input name="bitfunConfigDir" value="' + esc(defaults.bitfunConfigDir) + '" required /></div>' +
+            '<div class="field"><label>BitFun Config Root</label><input name="bitfunConfigDir" value="' + esc(defaults.bitfunConfigDir) + '" required /></div>' +
             '<div class="field"><label>Jobs Dir</label><input name="jobsDir" value="' + esc(defaults.jobsDir) + '" required /></div>' +
           '</div>' +
           '<div class="actions">' +

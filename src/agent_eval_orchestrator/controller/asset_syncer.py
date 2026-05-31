@@ -104,6 +104,8 @@ def validate_create_task_assets(
         raise RuntimeError(f"bitfunCliPath must exist and be executable: {bitfun_cli_path}")
     if not bitfun_config_dir.exists() or not bitfun_config_dir.is_dir():
         raise RuntimeError(f"bitfunConfigDir must be an existing directory: {bitfun_config_dir}")
+    if not (bitfun_config_dir / "config").is_dir():
+        raise RuntimeError(f"bitfunConfigDir must contain a config directory: {bitfun_config_dir / 'config'}")
     if not worker_ids:
         raise RuntimeError("workerIds must not be empty")
     workers_by_id = {str(item["worker_id"]): item for item in workers}
@@ -189,7 +191,7 @@ def sync_bitfun_local(
     target_config = target_bitfun_dir / "config"
     if target_config.exists():
         shutil.rmtree(target_config)
-    shutil.copytree(bitfun_config_dir, target_config)
+    shutil.copytree(bitfun_config_dir / "config", target_config)
 
 
 def sync_cases_remote(
@@ -220,7 +222,7 @@ def sync_bitfun_remote(
     ssh.remote_mkdir_p(host_alias, f"{target_root}/bitfun")
     ssh.scp_file(bitfun_cli_path, f"{host_alias}:{target_root}/bitfun/bitfun-cli")
     ssh.rsync_dir(
-        bitfun_config_dir,
+        bitfun_config_dir / "config",
         f"{host_alias}:{target_root}/bitfun/config/",
         remote=True,
     )

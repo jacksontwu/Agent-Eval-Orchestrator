@@ -94,6 +94,7 @@ def default_bitfun_config_dir(*, worker_id: str, shared_root: Path | str | None)
 
 def build_harbor_bind_mounts(*, uv_binary: str, harbor_repo: str, bitfun_config_dir: str) -> list[dict[str, Any]]:
     harbor_root = str(Path(harbor_repo).expanduser())
+    bitfun_config_root = str(Path(bitfun_config_dir).expanduser())
     return [
         {"type": "bind", "source": uv_binary, "target": "/usr/local/bin/uv", "read_only": True},
         {
@@ -102,7 +103,12 @@ def build_harbor_bind_mounts(*, uv_binary: str, harbor_repo: str, bitfun_config_
             "target": "/usr/local/bin/bitfun-cli",
             "read_only": True,
         },
-        {"type": "bind", "source": bitfun_config_dir, "target": "/root/.config/bitfun"},
+        {
+            "type": "bind",
+            "source": f"{bitfun_config_root}/config",
+            "target": "/root/.config/bitfun/config",
+            "read_only": True,
+        },
     ]
 
 
@@ -116,7 +122,12 @@ def build_sync_bind_mounts(*, uv_binary: str, sync_root: str) -> list[dict[str, 
             "target": "/usr/local/bin/bitfun-cli",
             "read_only": True,
         },
-        {"type": "bind", "source": f"{root}/bitfun/config", "target": "/root/.config/bitfun"},
+        {
+            "type": "bind",
+            "source": f"{root}/bitfun/config",
+            "target": "/root/.config/bitfun/config",
+            "read_only": True,
+        },
     ]
 
 

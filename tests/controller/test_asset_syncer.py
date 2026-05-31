@@ -18,6 +18,13 @@ from agent_eval_orchestrator.controller.asset_syncer import (
 from agent_eval_orchestrator.core.ids import new_id
 
 
+def _make_bitfun_config_root(path: Path) -> Path:
+    config_dir = path / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "app.json").write_text("{}", encoding="utf-8")
+    return path
+
+
 def test_is_local_worker_by_flag():
     worker = {"capabilities": {"localToController": True}}
     assert is_local_worker(worker, Path("/tmp/controller")) is True
@@ -48,8 +55,7 @@ def test_validate_create_task_assets(tmp_path, store):
     bitfun_cli = tmp_path / "bitfun-cli"
     bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
     os.chmod(bitfun_cli, 0o755)
-    config_dir = tmp_path / "bitfun-config"
-    config_dir.mkdir()
+    config_dir = _make_bitfun_config_root(tmp_path / "bitfun-config")
 
     store.register_worker(
         worker_id="local-a",
@@ -70,7 +76,7 @@ def test_validate_create_task_assets(tmp_path, store):
     )
 
 
-def test_validate_rejects_remote_without_ssh(tmp_path, store):
+def test_validate_rejects_bitfun_config_root_without_config_subdir(tmp_path, store):
     dataset = tmp_path / "dataset"
     case_a = dataset / "case-a"
     case_a.mkdir(parents=True)
@@ -80,6 +86,36 @@ def test_validate_rejects_remote_without_ssh(tmp_path, store):
     os.chmod(bitfun_cli, 0o755)
     config_dir = tmp_path / "bitfun-config"
     config_dir.mkdir()
+
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime")},
+    )
+    with pytest.raises(RuntimeError, match="must contain a config directory"):
+        validate_create_task_assets(
+            dataset_path=dataset,
+            bitfun_cli_path=bitfun_cli,
+            bitfun_config_dir=config_dir,
+            case_ids=["case-a"],
+            workers=store.list_workers(),
+            worker_ids=["local-a"],
+            controller_shared_root=tmp_path,
+        )
+
+
+def test_validate_rejects_remote_without_ssh(tmp_path, store):
+    dataset = tmp_path / "dataset"
+    case_a = dataset / "case-a"
+    case_a.mkdir(parents=True)
+    (case_a / "task.toml").write_text("", encoding="utf-8")
+    bitfun_cli = tmp_path / "bitfun-cli"
+    bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(bitfun_cli, 0o755)
+    config_dir = _make_bitfun_config_root(tmp_path / "bitfun-config")
 
     store.register_worker(
         worker_id="remote-a",
@@ -109,8 +145,7 @@ def test_validate_rejects_remote_without_ssh_even_if_path_exists(tmp_path, store
     bitfun_cli = tmp_path / "bitfun-cli"
     bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
     os.chmod(bitfun_cli, 0o755)
-    config_dir = tmp_path / "bitfun-config"
-    config_dir.mkdir()
+    config_dir = _make_bitfun_config_root(tmp_path / "bitfun-config")
     remote_runtime = tmp_path / "remote-runtime"
     remote_runtime.mkdir()
 
@@ -164,7 +199,8 @@ def test_worker_executor_paths():
     assert paths["mounts"][1]["source"] == "/tmp/sync/run-1/bitfun/bitfun-cli"
     assert paths["mounts"][1]["target"] == "/usr/local/bin/bitfun-cli"
     assert paths["mounts"][2]["source"] == "/tmp/sync/run-1/bitfun/config"
-    assert paths["mounts"][2]["target"] == "/root/.config/bitfun"
+    assert paths["mounts"][2]["target"] == "/root/.config/bitfun/config"
+    assert paths["mounts"][2]["read_only"] is True
 
 
 def test_initial_worker_steps_and_status():
@@ -189,19 +225,23 @@ def test_sync_bitfun_local_preserves_executable(tmp_path):
     cli = tmp_path / "bitfun-cli"
     cli.write_text("#!/bin/sh\n", encoding="utf-8")
     os.chmod(cli, 0o755)
-    config = tmp_path / "config"
-    config.mkdir()
-    (config / "settings.toml").write_text("a=1", encoding="utf-8")
+    config_root = tmp_path / "bitfun-root"
+    config = config_root / "config"
+    config.mkdir(parents=True)
+    (config / "app.json").write_text("{}", encoding="utf-8")
+    (config_root / "data").mkdir()
+    (config_root / "data" / "runtime.json").write_text("{}", encoding="utf-8")
     target = tmp_path / "target"
     sync_bitfun_local(
         bitfun_cli_path=cli,
-        bitfun_config_dir=config,
+        bitfun_config_dir=config_root,
         target_bitfun_dir=target / "bitfun",
     )
     copied = target / "bitfun" / "bitfun-cli"
     assert copied.exists()
     assert os.access(copied, os.X_OK)
-    assert (target / "bitfun" / "config" / "settings.toml").exists()
+    assert (target / "bitfun" / "config" / "app.json").exists()
+    assert not (target / "bitfun" / "data").exists()
 
 
 def test_sync_cases_remote_uses_rsync(sample_ssh_config, tmp_path):
@@ -229,8 +269,7 @@ def test_asset_syncer_promotes_batches_on_success(store, tmp_path, sample_ssh_co
     bitfun_cli = tmp_path / "bitfun-cli"
     bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
     os.chmod(bitfun_cli, 0o755)
-    config_dir = tmp_path / "bitfun-config"
-    config_dir.mkdir()
+    config_dir = _make_bitfun_config_root(tmp_path / "bitfun-config")
     shared = tmp_path / "runtime"
 
     store.register_worker(
