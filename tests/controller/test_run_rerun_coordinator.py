@@ -5,7 +5,10 @@ from threading import Event, Lock, Thread
 import pytest
 
 import agent_eval_orchestrator.controller.run_rerun_coordinator as rerun_coordinator_module
-from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
+from agent_eval_orchestrator.controller.rerun_artifacts import (
+    derived_jobs_dir_for_run,
+    derived_rerun_job_name,
+)
 from agent_eval_orchestrator.controller.run_rerun_coordinator import RunRerunCoordinator, RerunValidationError
 from agent_eval_orchestrator.core.ids import sanitize_name
 from conftest import seed_finished_run_with_cases
@@ -540,6 +543,23 @@ def test_start_rerun_maps_harbor_trial_task_name_to_selected_case_id(store, tmp_
     job = store.get_run_rerun_job(result["rerunJobId"])
     rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
     assert rerun_batch["selected_case_ids"] == [full_case_id]
+
+
+def test_derived_rerun_job_name_uses_root_name_for_chained_reruns():
+    assert (
+        derived_rerun_job_name(
+            source_job_name="swe-p-0001-rerun-run-11e2e2e22838",
+            run_id="run-ebd84184539b",
+        )
+        == "swe-p-0001-rerun-run-ebd84184539b"
+    )
+    assert (
+        derived_rerun_job_name(
+            source_job_name="swe-p-0001-rerun-run-11e2e2e22838-rerun-run-ebd84184539b",
+            run_id="run-next123",
+        )
+        == "swe-p-0001-rerun-run-next123"
+    )
 
 
 def test_start_rerun_applies_config_and_updates_template_and_manifest(store, tmp_path):

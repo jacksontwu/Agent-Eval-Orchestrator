@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -13,8 +14,16 @@ def derived_jobs_dir_for_run(*, store: "Store", run: dict[str, Any]) -> Path:
     return store.layout.run_dir(str(run["owner"]), str(run["run_id"])) / "harbor" / "jobs"
 
 
+_DERIVED_RERUN_SUFFIX_RE = re.compile(r"(?:-rerun-run-[A-Za-z0-9]+)+$")
+
+
+def root_rerun_job_name(source_job_name: str) -> str:
+    root_name = _DERIVED_RERUN_SUFFIX_RE.sub("", source_job_name).strip()
+    return root_name or source_job_name
+
+
 def derived_rerun_job_name(*, source_job_name: str, run_id: str) -> str:
-    return f"{source_job_name}-rerun-{run_id}"
+    return f"{root_rerun_job_name(source_job_name)}-rerun-{run_id}"
 
 
 def _validate_distinct_paths(source: Path, target: Path, *, label: str) -> tuple[Path, Path]:
