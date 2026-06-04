@@ -549,7 +549,7 @@ INDEX_HTML = """<!doctype html>
               </div>
               <div class="field">
                 <label>Agent Name</label>
-                <input name="agentName" value="bitfun-cli" readonly />
+                <input name="agentName" value="bitfun-cli" required />
               </div>
               <div class="field">
                 <label>Per Worker Concurrency</label>

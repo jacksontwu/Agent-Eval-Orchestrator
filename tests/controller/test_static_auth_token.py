@@ -1,4 +1,30 @@
+from html.parser import HTMLParser
+
 from agent_eval_orchestrator.controller.static import INDEX_HTML
+
+
+class CreateFormInputParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_create_form = False
+        self.inputs: dict[str, dict[str, str | None]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attr_map = dict(attrs)
+        if tag == "form" and attr_map.get("id") == "createTaskForm":
+            self.in_create_form = True
+        if self.in_create_form and tag == "input" and attr_map.get("name"):
+            self.inputs[str(attr_map["name"])] = attr_map
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form" and self.in_create_form:
+            self.in_create_form = False
+
+
+def create_form_inputs() -> dict[str, dict[str, str | None]]:
+    parser = CreateFormInputParser()
+    parser.feed(INDEX_HTML)
+    return parser.inputs
 
 
 def test_dashboard_api_helper_sends_query_token_header() -> None:
@@ -26,3 +52,10 @@ def test_rerun_disabled_reason_is_visible_and_prefers_no_exception() -> None:
     assert INDEX_HTML.index(no_exception_check) < INDEX_HTML.index(unfinished_check, INDEX_HTML.index(no_exception_check))
     assert "const rerunReason = rerunDisabledReason(detail);" in INDEX_HTML
     assert '<span class="subtle">' in INDEX_HTML
+
+
+def test_create_form_agent_name_input_is_editable() -> None:
+    agent_input = create_form_inputs()["agentName"]
+
+    assert "readonly" not in agent_input
+    assert "disabled" not in agent_input
