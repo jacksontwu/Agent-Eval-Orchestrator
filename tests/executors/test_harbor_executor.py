@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from agent_eval_orchestrator.executors.harbor import HarborExecutor
@@ -64,6 +65,61 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
     assert "--verifier-timeout-multiplier 2.0" in shell
     assert "--environment-build-timeout-multiplier 1.5" in shell
     assert "/root/.config/bitfun" in shell
+
+
+def test_prepare_includes_model_agent_env_and_agent_kwargs(tmp_path: Path) -> None:
+    batch_root = tmp_path / "batch-root"
+    batch_root.mkdir()
+    dataset = tmp_path / "dataset" / "case-a"
+    dataset.mkdir(parents=True)
+
+    harbor_repo = tmp_path / "harbor"
+    harbor_repo.mkdir()
+
+    prepared = HarborExecutor().prepare(
+        batch={
+            "batch_id": "batch-test",
+            "batch_root": str(batch_root),
+            "selected_case_ids": ["case-a"],
+        },
+        run={},
+        template={},
+        dataset_ref=str(dataset.parent),
+        executor_config={
+            "agentName": "bitfun-cli",
+            "envType": "docker",
+            "nConcurrent": 1,
+            "modelName": "deepseek-v4-pro",
+            "agentEnv": {
+                "ANTHROPIC_API_KEY": "<your-api-key>",
+                "ANTHROPIC_BASE_URL": "<your-base-url>",
+                "ANTHROPIC_MODEL": "deepseek-v4-pro",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-pro",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-v4-pro",
+            },
+            "agentKwargs": {
+                "thinking": "enabled",
+                "reasoning_effort": "max",
+            },
+            "harborRepoPath": str(harbor_repo),
+        },
+        local_root=tmp_path / "local",
+        shared_root=None,
+    )
+
+    shell = prepared.command[2]
+    assert "-m deepseek-v4-pro" in shell
+    assert f"--ae {shlex.quote('ANTHROPIC_API_KEY=<your-api-key>')}" in shell
+    assert f"--ae {shlex.quote('ANTHROPIC_BASE_URL=<your-base-url>')}" in shell
+    assert "--ae ANTHROPIC_MODEL=deepseek-v4-pro" in shell
+    assert "--ae ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro" in shell
+    assert "--ae ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro" in shell
+    assert "--ae ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro" in shell
+    assert "--ae CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro" in shell
+    assert "--ak reasoning_effort=max" in shell
+    assert "--ak thinking=enabled" in shell
 
 
 def test_prepare_applies_default_environment_flags_when_config_omits_them(tmp_path: Path) -> None:

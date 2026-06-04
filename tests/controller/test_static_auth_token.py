@@ -8,6 +8,7 @@ class CreateFormInputParser(HTMLParser):
         super().__init__()
         self.in_create_form = False
         self.inputs: dict[str, dict[str, str | None]] = {}
+        self.textareas: dict[str, dict[str, str | None]] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = dict(attrs)
@@ -15,6 +16,8 @@ class CreateFormInputParser(HTMLParser):
             self.in_create_form = True
         if self.in_create_form and tag == "input" and attr_map.get("name"):
             self.inputs[str(attr_map["name"])] = attr_map
+        if self.in_create_form and tag == "textarea" and attr_map.get("name"):
+            self.textareas[str(attr_map["name"])] = attr_map
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "form" and self.in_create_form:
@@ -25,6 +28,12 @@ def create_form_inputs() -> dict[str, dict[str, str | None]]:
     parser = CreateFormInputParser()
     parser.feed(INDEX_HTML)
     return parser.inputs
+
+
+def create_form_textareas() -> dict[str, dict[str, str | None]]:
+    parser = CreateFormInputParser()
+    parser.feed(INDEX_HTML)
+    return parser.textareas
 
 
 def test_dashboard_api_helper_sends_query_token_header() -> None:
@@ -59,3 +68,22 @@ def test_create_form_agent_name_input_is_editable() -> None:
 
     assert "readonly" not in agent_input
     assert "disabled" not in agent_input
+
+
+def test_create_form_exposes_model_agent_env_and_agent_kwargs() -> None:
+    inputs = create_form_inputs()
+    textareas = create_form_textareas()
+
+    assert inputs["modelName"]["value"] == "deepseek-v4-pro"
+    assert "agentEnv" in textareas
+    assert "agentKwargs" in textareas
+
+
+def test_create_payload_parses_agent_env_and_kwargs_into_executor_config() -> None:
+    assert "function parseKeyValueLines" in INDEX_HTML
+    assert 'const modelName = String(data.get("modelName") || "").trim()' in INDEX_HTML
+    assert 'const agentEnv = parseKeyValueLines(data.get("agentEnv"))' in INDEX_HTML
+    assert 'const agentKwargs = parseKeyValueLines(data.get("agentKwargs"))' in INDEX_HTML
+    assert "if (modelName) executorConfig.modelName = modelName" in INDEX_HTML
+    assert "if (Object.keys(agentEnv).length) executorConfig.agentEnv = agentEnv" in INDEX_HTML
+    assert "if (Object.keys(agentKwargs).length) executorConfig.agentKwargs = agentKwargs" in INDEX_HTML

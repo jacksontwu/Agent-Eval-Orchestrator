@@ -552,6 +552,10 @@ INDEX_HTML = """<!doctype html>
                 <input name="agentName" value="bitfun-cli" required />
               </div>
               <div class="field">
+                <label>Model</label>
+                <input name="modelName" value="deepseek-v4-pro" placeholder="deepseek-v4-pro" />
+              </div>
+              <div class="field">
                 <label>Per Worker Concurrency</label>
                 <input name="nConcurrent" type="number" min="1" value="1" required />
               </div>
@@ -598,6 +602,17 @@ INDEX_HTML = """<!doctype html>
             <div class="field" style="margin-bottom:16px">
               <label>Selected Case IDs（每行一个，可空）</label>
               <textarea name="selectedCaseIds" placeholder="留空则执行全量 dataset，并按 worker 容量自动分配&#10;astropy__astropy-12907&#10;astropy__astropy-13033"></textarea>
+            </div>
+
+            <div class="detail-grid" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+              <div class="field">
+                <label>Agent Env (--ae，每行一个 KEY=value)</label>
+                <textarea name="agentEnv" placeholder="ANTHROPIC_API_KEY=&lt;your-api-key&gt;&#10;ANTHROPIC_BASE_URL=&lt;your-base-url&gt;&#10;ANTHROPIC_MODEL=deepseek-v4-pro&#10;ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro&#10;ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro&#10;ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro&#10;CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro"></textarea>
+              </div>
+              <div class="field">
+                <label>Agent Kwargs (--ak，每行一个 KEY=value)</label>
+                <textarea name="agentKwargs" placeholder="thinking=enabled&#10;reasoning_effort=max"></textarea>
+              </div>
             </div>
 
             <div style="margin-bottom:16px">
@@ -865,6 +880,35 @@ INDEX_HTML = """<!doctype html>
     function parsePositiveNumber(value, fallback = null) {
       const parsed = Number(value);
       return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    }
+
+    function stripWrappedQuotes(value) {
+      const text = String(value || "").trim();
+      if (text.length >= 2) {
+        const first = text[0];
+        const last = text[text.length - 1];
+        if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+          return text.slice(1, -1);
+        }
+      }
+      return text;
+    }
+
+    function parseKeyValueLines(value) {
+      const result = {};
+      String(value || "")
+        .split(/[\\n,]/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .forEach(line => {
+          const normalized = line.replace(/^--a[ek]\\s+/, "").trim();
+          const separator = normalized.indexOf("=");
+          if (separator <= 0) return;
+          const key = normalized.slice(0, separator).trim();
+          if (!key) return;
+          result[key] = stripWrappedQuotes(normalized.slice(separator + 1));
+        });
+      return result;
     }
 
     function fmtTrace(item) {
@@ -2389,22 +2433,29 @@ INDEX_HTML = """<!doctype html>
 
     function collectTaskConfigPayload(form) {
       const data = new FormData(form);
+      const modelName = String(data.get("modelName") || "").trim();
+      const agentEnv = parseKeyValueLines(data.get("agentEnv"));
+      const agentKwargs = parseKeyValueLines(data.get("agentKwargs"));
+      const executorConfig = {
+        agentName: String(data.get("agentName") || "bitfun-cli").trim(),
+        nConcurrent: Number(data.get("nConcurrent") || 1),
+        timeoutMultiplier: parsePositiveNumber(data.get("timeoutMultiplier"), 1.0),
+        agentTimeoutMultiplier: parsePositiveNumber(data.get("agentTimeoutMultiplier"), 3.0),
+        verifierTimeoutMultiplier: parsePositiveNumber(data.get("verifierTimeoutMultiplier"), 2.0),
+        environmentBuildTimeoutMultiplier: parsePositiveNumber(
+          data.get("environmentBuildTimeoutMultiplier"),
+          1.5,
+        ),
+      };
+      if (modelName) executorConfig.modelName = modelName;
+      if (Object.keys(agentEnv).length) executorConfig.agentEnv = agentEnv;
+      if (Object.keys(agentKwargs).length) executorConfig.agentKwargs = agentKwargs;
       return {
         datasetPath: String(data.get("datasetPath") || "").trim(),
         bitfunCliPath: String(data.get("bitfunCliPath") || "").trim(),
         bitfunConfigDir: String(data.get("bitfunConfigDir") || "").trim(),
         jobsDir: String(data.get("jobsDir") || "/root/projects/harbor/jobs").trim(),
-        executorConfig: {
-          agentName: String(data.get("agentName") || "bitfun-cli").trim(),
-          nConcurrent: Number(data.get("nConcurrent") || 1),
-          timeoutMultiplier: parsePositiveNumber(data.get("timeoutMultiplier"), 1.0),
-          agentTimeoutMultiplier: parsePositiveNumber(data.get("agentTimeoutMultiplier"), 3.0),
-          verifierTimeoutMultiplier: parsePositiveNumber(data.get("verifierTimeoutMultiplier"), 2.0),
-          environmentBuildTimeoutMultiplier: parsePositiveNumber(
-            data.get("environmentBuildTimeoutMultiplier"),
-            1.5,
-          ),
-        },
+        executorConfig,
       };
     }
 
