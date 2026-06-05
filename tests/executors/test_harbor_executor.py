@@ -31,7 +31,7 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
             "nConcurrent": 1,
             "maxRetries": 3,
             "environmentForceBuild": False,
-            "environmentDelete": False,
+            "environmentDelete": True,
             "timeoutMultiplier": 1.0,
             "agentTimeoutMultiplier": 3.0,
             "verifierTimeoutMultiplier": 2.0,
@@ -55,7 +55,7 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
     shell = prepared.command[2]
     assert "--max-retries 3" in shell
     assert "--no-force-build" in shell
-    assert "--no-delete" in shell
+    assert "--delete" in shell
     assert "--ae XDG_CONFIG_HOME" not in shell
     assert "-a bitfun-cli" in shell
     assert "-e docker" in shell
@@ -153,7 +153,7 @@ def test_prepare_applies_default_environment_flags_when_config_omits_them(tmp_pa
 
     shell = prepared.command[2]
     assert "--no-force-build" in shell
-    assert "--no-delete" in shell
+    assert "--delete" in shell
 
 
 def test_prepare_claude_code_normalizes_retries_and_agent_kwargs(tmp_path: Path) -> None:
