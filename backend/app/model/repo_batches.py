@@ -38,6 +38,20 @@ def list_by_status(session: Session, status: str) -> list[Batch]:
     return list(session.scalars(stmt))
 
 
+def requeue_running_for_worker(session: Session, worker_id: str) -> int:
+    stmt = select(Batch).where(
+        Batch.assigned_worker_id == worker_id,
+        Batch.status.in_(("assigned", "running")),
+    )
+    count = 0
+    for batch in session.scalars(stmt):
+        batch.assigned_worker_id = None
+        batch.status = "queued"
+        batch.current_step = None
+        count += 1
+    return count
+
+
 def next_assigned_for_worker(session: Session, worker_id: str) -> Batch | None:
     stmt = (
         select(Batch)
