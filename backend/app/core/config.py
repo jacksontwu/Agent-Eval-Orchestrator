@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.defaults import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SHARED_ROOT, DEFAULT_HARBOR_REPO
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="AEO_", env_file=".env", extra="ignore")
+
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT
+    shared_root: Path = Field(default=DEFAULT_SHARED_ROOT)
+    harbor_repo: Path = Field(default=DEFAULT_HARBOR_REPO)
+    token: str | None = Field(default=None, alias="AEO_TOKEN")
+    allow_no_auth: bool = Field(default=False, alias="AEO_ALLOW_NO_AUTH")
+    database_url: str | None = Field(default=None, alias="DATABASE_URL")
+
+    @model_validator(mode="after")
+    def _derive_database_url(self) -> "Settings":
+        if not self.database_url:
+            db = self.shared_root / "controller" / "aeo.db"
+            object.__setattr__(self, "database_url", f"sqlite:///{db}")
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
