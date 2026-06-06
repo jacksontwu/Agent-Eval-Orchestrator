@@ -6,6 +6,7 @@ import subprocess
 import time
 from urllib import request
 
+from app.core.config import get_settings
 from app.service.normalizers.harbor_timestamps import normalize_jobs_dir
 
 
@@ -73,3 +74,28 @@ class HarborViewerManager:
         self.sessions[viewer_id] = session
         self._wait_ready(port)
         return session
+
+
+_global_manager: HarborViewerManager | None = None
+
+
+def _session_dto(session: ViewerSession) -> dict:
+    return {
+        "viewerId": session.viewer_id,
+        "port": session.port,
+        "url": f"http://127.0.0.1:{session.port}",
+        "jobsDir": str(session.jobs_dir),
+    }
+
+
+def ensure_global() -> dict:
+    """Ensure a Harbor viewer is running over the controller's global jobs dir."""
+    global _global_manager
+    settings = get_settings()
+    harbor_repo = Path(settings.harbor_repo)
+    jobs_dir = harbor_repo / "jobs"
+    if _global_manager is None:
+        logs_dir = Path(settings.shared_root) / "controller" / "logs"
+        _global_manager = HarborViewerManager(harbor_repo=harbor_repo, logs_dir=logs_dir)
+    session = _global_manager.ensure_viewer(viewer_id="global", jobs_dir=jobs_dir)
+    return _session_dto(session)
