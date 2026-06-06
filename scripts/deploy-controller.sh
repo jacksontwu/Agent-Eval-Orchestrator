@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-shot deploy: rebuild the frontend bundle and restart the controller so the
+# deploy-controller.sh - one-shot deploy: rebuild the frontend bundle and restart
+# the controller so the
 # latest frontend (and backend) code takes effect. Run this after changing the
 # frontend under frontend/app/.
 #
