@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-if [[ "$*" == *"/api/health"* ]]; then
-  echo '{"ok":true}'
-  exit 0
-fi
-exit 22
