@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import db_session
 from app.schema.assets import AssetManifest
 from app.schema.worker_protocol import (
+    ClaimRequest,
+    ClaimResponse,
     HeartbeatRequest,
     HeartbeatResponse,
     RegisterRequest,
@@ -25,6 +27,11 @@ def register(body: RegisterRequest, session: Session = Depends(db_session)) -> R
 def heartbeat(body: HeartbeatRequest, session: Session = Depends(db_session)) -> HeartbeatResponse:
     worker_protocol_service.heartbeat(session, body)
     return HeartbeatResponse()
+
+
+@router.post("/workers/claim", response_model=ClaimResponse)
+def claim(body: ClaimRequest, session: Session = Depends(db_session)) -> ClaimResponse:
+    return worker_protocol_service.claim(session, body)
 
 
 @router.get("/workers/assets/{asset_manifest_id}", response_model=AssetManifest)

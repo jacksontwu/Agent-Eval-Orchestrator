@@ -38,6 +38,16 @@ def list_by_status(session: Session, status: str) -> list[Batch]:
     return list(session.scalars(stmt))
 
 
+def next_assigned_for_worker(session: Session, worker_id: str) -> Batch | None:
+    stmt = (
+        select(Batch)
+        .where(Batch.assigned_worker_id == worker_id, Batch.status == "assigned")
+        .order_by(Batch.created_at)
+        .limit(1)
+    )
+    return session.scalars(stmt).first()
+
+
 def assign(session: Session, batch_id: str, worker_id: str) -> None:
     batch = session.get(Batch, batch_id)
     if batch is None:

@@ -3,9 +3,10 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.core.ids import now_iso
-from app.model import repo_batches, repo_case_runs, repo_workers
+from app.model import repo_batches, repo_case_runs, repo_runs, repo_templates, repo_workers
 from app.model.tables import Worker
-from app.schema.worker_protocol import HeartbeatRequest, RegisterRequest
+from app.schema.worker_protocol import ClaimRequest, ClaimResponse, HeartbeatRequest, RegisterRequest
+from app.service import asset_service
 
 
 def register(session: Session, req: RegisterRequest) -> Worker:
@@ -37,6 +38,32 @@ def heartbeat(session: Session, req: HeartbeatRequest) -> None:
         if req.summary is not None:
             repo_batches.set_summary(session, req.batch_id, req.summary, {})
     session.commit()
+
+
+def claim(session: Session, req: ClaimRequest) -> ClaimResponse:
+    batch = repo_batches.next_assigned_for_worker(session, req.worker_id)
+    if batch is None:
+        return ClaimResponse()
+    repo_batches.set_status(session, batch.batch_id, "running", started_at=now_iso())
+
+    dataset_ref = None
+    run = repo_runs.get_run(session, batch.run_id)
+    if run is not None:
+        template = repo_templates.get_template(session, run.template_id)
+        if template is not None:
+            dataset_ref = template.dataset_ref
+
+    manifest = asset_service.build_manifest(session, batch.batch_id)
+    asset_manifest_id = manifest.asset_manifest_id
+    session.commit()
+    return ClaimResponse(
+        batch_id=batch.batch_id,
+        dataset_ref=dataset_ref,
+        executor_config=batch.executor_metadata or {},
+        asset_manifest_id=asset_manifest_id,
+        asset_url=f"/api/workers/assets/{asset_manifest_id}",
+        asset_manifest=manifest,
+    )
 
 
 def _to_case_rows(cases: list[dict]) -> list[dict]:
