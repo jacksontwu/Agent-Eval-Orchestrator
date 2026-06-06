@@ -6,6 +6,7 @@ from app.api.routes import (
     case_runs,
     dashboard,
     datasets,
+    enroll,
     files,
     harbor_viewer,
     health,
@@ -30,3 +31,4 @@ authed_router.include_router(batches.router, tags=["batches"])
 authed_router.include_router(worker_protocol.router, tags=["worker-protocol"])
 authed_router.include_router(files.router, tags=["files"])
 authed_router.include_router(harbor_viewer.router, tags=["harbor-viewer"])
+authed_router.include_router(enroll.router, tags=["enroll"])
