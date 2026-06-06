@@ -5,8 +5,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BACKEND_DIR="${REPO_ROOT}/backend"
-LOG_DIR="${REPO_ROOT}/runtime/logs"
-PID_FILE="${REPO_ROOT}/runtime/controller.pid"
 
 # Load project-root .env so the shell guard and uvicorn see the same config
 # regardless of how the script is invoked.
@@ -16,6 +14,13 @@ if [ -f "${REPO_ROOT}/.env" ]; then
   . "${REPO_ROOT}/.env"
   set +a
 fi
+
+# Logs and pidfile live under AEO_SHARED_ROOT/controller so everything follows
+# the same data root (relative roots resolve against the repo root).
+SHARED_ROOT="${AEO_SHARED_ROOT:-runtime}"
+case "${SHARED_ROOT}" in /*) ;; *) SHARED_ROOT="${REPO_ROOT}/${SHARED_ROOT}" ;; esac
+LOG_DIR="${SHARED_ROOT}/controller/logs"
+PID_FILE="${SHARED_ROOT}/controller/controller.pid"
 
 # Refuse to start wide-open on a network-reachable host.
 if [ -z "${AEO_TOKEN:-}" ] && [ "${AEO_ALLOW_NO_AUTH:-}" != "1" ]; then

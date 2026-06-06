@@ -4,15 +4,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PID_FILE="${REPO_ROOT}/runtime/controller.pid"
 
-# Load .env so we know which host/port to probe.
+# Load .env so we know which host/port/root to probe.
 if [ -f "${REPO_ROOT}/.env" ]; then
   set -a
   # shellcheck disable=SC1091
   . "${REPO_ROOT}/.env"
   set +a
 fi
+
+SHARED_ROOT="${AEO_SHARED_ROOT:-runtime}"
+case "${SHARED_ROOT}" in /*) ;; *) SHARED_ROOT="${REPO_ROOT}/${SHARED_ROOT}" ;; esac
+PID_FILE="${SHARED_ROOT}/controller/controller.pid"
 
 HOST="${AEO_HOST:-0.0.0.0}"
 PORT="${AEO_PORT:-8790}"
