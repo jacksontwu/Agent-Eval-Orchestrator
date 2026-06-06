@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     token: str | None = Field(default=None, alias="AEO_TOKEN")
     allow_no_auth: bool = Field(default=False, alias="AEO_ALLOW_NO_AUTH")
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
+    frontend_dist: str = Field(default="frontend/dist", alias="AEO_FRONTEND_DIST")
 
     @model_validator(mode="after")
     def _finalize(self) -> "Settings":

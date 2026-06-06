@@ -45,7 +45,9 @@ def create_app() -> FastAPI:
 
 
 def _mount_spa(app: FastAPI) -> None:
-    dist = Path(os.environ.get("AEO_FRONTEND_DIST", "frontend/dist"))
+    from app.core.config import get_settings
+
+    dist = Path(get_settings().frontend_dist)
     if not dist.is_dir():
         return
     assets_dir = dist / "assets"
