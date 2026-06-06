@@ -1,9 +1,16 @@
 import pytest
 from sqlalchemy import event
 
+from app.core.config import Settings
 from app.model.base import Base
 import app.model.tables  # noqa: F401
 from app.model.db import make_engine, make_session_factory
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dotenv(monkeypatch):
+    """Tests must not pick up a developer's on-disk .env; force env-vars only."""
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @pytest.fixture

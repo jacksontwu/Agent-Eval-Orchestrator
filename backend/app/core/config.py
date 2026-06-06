@@ -8,9 +8,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.defaults import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SHARED_ROOT, DEFAULT_HARBOR_REPO
 
+# Resolve the project-root .env absolutely so every entry point (uvicorn, alembic,
+# worker daemon) loads the same file regardless of the current working directory.
+# A backend-local .env (if present) takes precedence over the repo-root one.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_ENV_FILES = (str(_REPO_ROOT / ".env"), str(_REPO_ROOT / "backend" / ".env"))
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AEO_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="AEO_", env_file=_ENV_FILES, extra="ignore")
 
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
