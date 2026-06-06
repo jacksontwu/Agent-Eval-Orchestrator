@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -9,10 +9,12 @@ from app.schema.worker_protocol import (
     ClaimResponse,
     HeartbeatRequest,
     HeartbeatResponse,
+    JobArchiveResponse,
     RegisterRequest,
     RegisterResponse,
 )
 from app.service import asset_service, worker_protocol_service
+from app.service.orchestration import result_collector
 
 router = APIRouter()
 
@@ -44,3 +46,16 @@ def get_asset_file(asset_manifest_id: str, path: str = Query(...),
                    session: Session = Depends(db_session)) -> FileResponse:
     resolved = asset_service.open_entry(session, asset_manifest_id, path)
     return FileResponse(resolved)
+
+
+@router.post("/workers/job-archive", response_model=JobArchiveResponse)
+def job_archive(batch_id: str = Form(alias="batchId"), sha256: str = Form(...),
+                archive: UploadFile = File(...),
+                session: Session = Depends(db_session)) -> JobArchiveResponse:
+    from app.core.config import get_settings
+    from app.core.layout import default_layout
+
+    layout = default_layout(get_settings().shared_root)
+    result_collector.ingest_archive(session, batch_id=batch_id, sha256=sha256,
+                                     file_stream=archive.file, layout=layout)
+    return JobArchiveResponse(batch_id=batch_id)
