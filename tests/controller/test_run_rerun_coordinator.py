@@ -546,6 +546,73 @@ def test_start_rerun_maps_harbor_trial_task_name_to_selected_case_id(store, tmp_
     assert rerun_batch["selected_case_ids"] == [full_case_id]
 
 
+def test_start_rerun_maps_prefixed_harbor_task_name_to_short_selected_case_id(store, tmp_path):
+    dataset = tmp_path / "terminal-bench-2"
+    short_case_id = "adaptive-rejection-sampler"
+    (dataset / short_case_id).mkdir(parents=True)
+    template = store.create_task_template(
+        owner="default",
+        name="exc-test",
+        dataset_ref=str(dataset),
+        executor_kind="harbor-docker",
+        executor_config={},
+        model_profile_ref=None,
+        note="",
+    )
+    run = store.create_run(template_id=template["template_id"], display_name="tb2-bitfun-ds-0004")
+    store.register_worker(
+        worker_id="worker-a",
+        display_name="worker-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={},
+    )
+    batch = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=[short_case_id],
+        preferred_worker_id="worker-a",
+        batch_options={},
+    )
+    store.update_batch_progress(
+        batch_id=batch["batch_id"],
+        worker_id="worker-a",
+        status="succeeded",
+        current_step=None,
+        finished=True,
+        cases=[
+            {
+                "caseId": short_case_id,
+                "status": "succeeded",
+                "score": 0.0,
+            }
+        ],
+    )
+    jobs_root = tmp_path / "harbor" / "jobs"
+    job_dir = jobs_root / "tb2-bitfun-ds-0004"
+    _write_jobs_trial(
+        job_dir,
+        f"{short_case_id}__npJJrTn",
+        task_name=f"terminal-bench/{short_case_id}",
+        exception_text="Traceback (most recent call last):\nAgentTimeoutError: timed out\n",
+    )
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {"combinedJobsDir": str(jobs_root)},
+    )
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(
+        run["run_id"],
+        config={"selectedErrorTypes": ["AgentTimeoutError"]},
+    )
+
+    assert result["exceptionCount"] == 1
+    assert result["workerShards"] == {"worker-a": 1}
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    assert rerun_batch["selected_case_ids"] == [short_case_id]
+
+
 def test_derived_rerun_job_name_uses_root_name_for_chained_reruns():
     assert (
         derived_rerun_job_name(

@@ -343,6 +343,8 @@ class RunRerunCoordinator:
                 raise RerunValidationError(400, f"duplicate exception trial for case: {case_id}")
             seen_cases.add(case_id)
             source_item = case_index.get(case_id)
+            if source_item is None and "/" in case_id:
+                source_item = case_index.get(case_id.rsplit("/", 1)[-1])
             if source_item is None:
                 raise RerunValidationError(400, f"exception trial is not part of run: {case_id}")
             error_type = exception_type_from_text(
