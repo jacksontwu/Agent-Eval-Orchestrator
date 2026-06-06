@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router, authed_router
 from app.model.db import get_session
@@ -38,7 +40,23 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
     app.include_router(authed_router, prefix="/api")
     app.add_exception_handler(ServiceError, _service_error_handler)
+    _mount_spa(app)
     return app
+
+
+def _mount_spa(app: FastAPI) -> None:
+    dist = Path(os.environ.get("AEO_FRONTEND_DIST", "frontend/dist"))
+    if not dist.is_dir():
+        return
+    assets_dir = dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    def spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404)
+        return FileResponse(dist / "index.html")
 
 
 app = create_app()
