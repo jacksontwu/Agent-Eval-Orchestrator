@@ -1,7 +1,17 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import require_token
-from app.api.routes import batches, case_runs, dashboard, datasets, health, runs, templates, workers
+from app.api.routes import (
+    batches,
+    case_runs,
+    dashboard,
+    datasets,
+    health,
+    runs,
+    templates,
+    worker_protocol,
+    workers,
+)
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(health.router, tags=["health"])
@@ -15,3 +25,4 @@ authed_router.include_router(dashboard.router, tags=["dashboard"])
 authed_router.include_router(runs.router, tags=["runs"])
 authed_router.include_router(case_runs.router, tags=["case-runs"])
 authed_router.include_router(batches.router, tags=["batches"])
+authed_router.include_router(worker_protocol.router, tags=["worker-protocol"])
