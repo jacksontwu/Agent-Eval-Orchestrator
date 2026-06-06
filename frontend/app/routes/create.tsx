@@ -44,7 +44,7 @@ export default function CreatePage() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      <h1 className="text-lg font-semibold">新建评测任务</h1>
+      <h1 className="text-2xl font-medium tracking-tight">新建评测任务</h1>
       <Card className="space-y-4">
         <Field label="任务名称">
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="my-eval" />
@@ -52,13 +52,13 @@ export default function CreatePage() {
         <Field label="数据集路径 (controller 上的绝对路径)">
           <Input value={datasetPath} onChange={(e) => setDatasetPath(e.target.value)} placeholder="/root/.../datasets/terminal-bench-2" />
           {data && (
-            <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-400">
+            <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
               {data.datasets.map((d) => (
                 <button
                   key={d.datasetRef}
                   disabled={!d.available}
                   onClick={() => setDatasetPath(d.path)}
-                  className="rounded border border-white/10 px-2 py-0.5 hover:bg-white/10 disabled:opacity-40"
+                  className="rounded-md border border-border px-2 py-0.5 transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
                 >
                   {d.datasetRef} {d.available ? "" : "(缺失)"}
                 </button>
@@ -92,8 +92,8 @@ export default function CreatePage() {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block space-y-1">
-      <span className="text-xs text-slate-400">{label}</span>
+    <label className="block space-y-1.5">
+      <span className="text-xs text-muted-foreground">{label}</span>
       {children}
     </label>
   );
