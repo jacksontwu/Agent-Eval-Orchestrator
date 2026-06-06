@@ -27,7 +27,11 @@ class Settings(BaseSettings):
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
 
     @model_validator(mode="after")
-    def _derive_database_url(self) -> "Settings":
+    def _finalize(self) -> "Settings":
+        # Resolve a relative shared_root against the repo root so the data location
+        # is stable regardless of the process's current working directory.
+        if not self.shared_root.is_absolute():
+            object.__setattr__(self, "shared_root", _REPO_ROOT / self.shared_root)
         if not self.database_url:
             db = self.shared_root / "controller" / "aeo.db"
             object.__setattr__(self, "database_url", f"sqlite:///{db}")

@@ -18,14 +18,18 @@ def _url() -> str:
     # Prefer an explicit env override; otherwise fall back to the app's derived
     # default (sqlite under shared_root) so bare `alembic upgrade head` works.
     url = os.environ.get("DATABASE_URL")
-    if url:
-        return url
-    from app.core.config import get_settings
+    if not url:
+        from app.core.config import get_settings
 
-    derived = get_settings().database_url
-    if not derived:
+        url = get_settings().database_url
+    if not url:
         raise RuntimeError("DATABASE_URL is required for alembic")
-    return derived
+    # Ensure the parent directory exists for sqlite file targets.
+    if url.startswith("sqlite:///"):
+        from pathlib import Path
+
+        Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
+    return url
 
 
 def run_migrations_offline() -> None:
