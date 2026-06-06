@@ -28,6 +28,7 @@ def client(session, monkeypatch):
     from app.main import create_app
 
     monkeypatch.setenv("AEO_ALLOW_NO_AUTH", "1")
+    monkeypatch.setenv("AEO_DISABLE_ORCHESTRATION", "1")
     monkeypatch.delenv("AEO_TOKEN", raising=False)
     get_settings.cache_clear()
     app = create_app()
