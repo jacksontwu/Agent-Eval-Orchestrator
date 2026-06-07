@@ -23,8 +23,8 @@ LOG_DIR="${SHARED_ROOT}/controller/logs"
 PID_FILE="${SHARED_ROOT}/controller/controller.pid"
 
 # Refuse to start wide-open on a network-reachable host.
-if [ -z "${AEO_TOKEN:-}" ] && [ "${AEO_ALLOW_NO_AUTH:-}" != "1" ]; then
-  echo "refusing to start: set AEO_TOKEN (or AEO_ALLOW_NO_AUTH=1 for local dev)" >&2
+if [ -z "${AEO_AUTH_SECRET:-}" ] && [ "${AEO_ALLOW_NO_AUTH:-}" != "1" ]; then
+  echo "refusing to start: set AEO_AUTH_SECRET (or AEO_ALLOW_NO_AUTH=1 for local dev)" >&2
   exit 1
 fi
 

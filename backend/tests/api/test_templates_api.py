@@ -7,7 +7,7 @@ from app.api.deps import db_session
 
 @pytest.fixture
 def client(session, monkeypatch):
-    # Default-deny auth: tests run in explicit dev-open mode unless they set AEO_TOKEN.
+    # Default-deny auth: tests run in explicit dev-open mode unless they configure Bearer auth.
     monkeypatch.setenv("AEO_ALLOW_NO_AUTH", "1")
     monkeypatch.delenv("AEO_TOKEN", raising=False)
     from app.core.config import get_settings
