@@ -58,7 +58,7 @@ def _sub_split(case_ids: list[str], parts: int) -> list[list[str]]:
     return [bucket for bucket in buckets if bucket]
 
 
-def create_and_distribute(session: Session, req: CreateDistributeRequest) -> CreateDistributeResponse:
+def create_and_distribute(session: Session, req: CreateDistributeRequest, *, owner: str) -> CreateDistributeResponse:
     dataset_path = Path(req.dataset_path).expanduser()
     case_ids = list(req.selected_case_ids) or _list_dataset_case_ids(dataset_path)
     if not case_ids:
@@ -72,11 +72,11 @@ def create_and_distribute(session: Session, req: CreateDistributeRequest) -> Cre
         raise ServiceError("no eligible workers")
 
     template = repo_templates.create_template(
-        session, owner=req.owner, name=req.name, dataset_ref=str(dataset_path),
+        session, owner=owner, name=req.name, dataset_ref=str(dataset_path),
         executor_kind="harbor-docker", executor_config=req.executor_config,
         model_profile_ref=req.model_profile_ref,
     )
-    run = repo_runs.create_run(session, template_id=template.template_id, owner=req.owner,
+    run = repo_runs.create_run(session, template_id=template.template_id, owner=owner,
                                display_name=req.name)
     layout = default_layout(get_settings().shared_root)
 
@@ -97,9 +97,9 @@ def create_and_distribute(session: Session, req: CreateDistributeRequest) -> Cre
         worker_shards[worker_id] = shard
         for sub in _sub_split(shard, req.per_worker_concurrency):
             batch = repo_batches.create_batch(
-                session, run_id=run.run_id, owner=req.owner, executor_kind="harbor-docker",
+                session, run_id=run.run_id, owner=owner, executor_kind="harbor-docker",
                 selected_case_ids=sub, batch_options={"concurrency": req.per_worker_concurrency},
-                batch_root=str(layout.batch_dir(req.owner, run.run_id, "pending")),
+                batch_root=str(layout.batch_dir(owner, run.run_id, "pending")),
                 preferred_worker_id=worker_id, executor_metadata=dict(executor_metadata_base),
             )
             session.flush()

@@ -11,7 +11,6 @@ class RunCreate(ApiModel):
 
 class CreateDistributeRequest(ApiModel):
     name: str
-    owner: str = "demo"
     dataset_path: str                       # absolute path to the downloaded dataset on the controller
     bitfun_cli_path: str
     bitfun_config_dir: str

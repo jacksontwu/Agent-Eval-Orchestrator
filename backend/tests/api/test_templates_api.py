@@ -27,8 +27,9 @@ def test_create_and_list_template(client):
     assert any(t["templateId"] == tid for t in listed)
 
 
-def test_requires_token(monkeypatch, session):
+def test_old_shared_token_header_rejected(monkeypatch, session):
     monkeypatch.setenv("AEO_TOKEN", "secret")
+    monkeypatch.setenv("AEO_AUTH_SECRET", "unit-secret-with-at-least-32-bytes")
     monkeypatch.delenv("AEO_ALLOW_NO_AUTH", raising=False)
     from app.core.config import get_settings
     get_settings.cache_clear()
@@ -36,5 +37,5 @@ def test_requires_token(monkeypatch, session):
     app.dependency_overrides[db_session] = lambda: session
     c = TestClient(app)
     assert c.get("/api/task-templates").status_code == 401
-    assert c.get("/api/task-templates", headers={"X-AEO-Token": "secret"}).status_code == 200
+    assert c.get("/api/task-templates", headers={"X-AEO-Token": "secret"}).status_code == 401
     get_settings.cache_clear()
