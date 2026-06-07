@@ -8,6 +8,8 @@ import CreatePage from "./routes/create";
 import TaskDetailPage from "./routes/task-detail";
 import WorkersPage from "./routes/workers";
 import LoginPage from "./routes/login";
+import UsersPage from "./routes/users";
+import GroupsPage from "./routes/groups";
 
 const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
@@ -19,6 +21,8 @@ const router = createBrowserRouter([
       { path: "create", element: <CreatePage /> },
       { path: "tasks/:runId", element: <TaskDetailPage /> },
       { path: "workers", element: <WorkersPage /> },
+      { path: "users", element: <UsersPage /> },
+      { path: "groups", element: <GroupsPage /> },
     ],
   },
 ]);

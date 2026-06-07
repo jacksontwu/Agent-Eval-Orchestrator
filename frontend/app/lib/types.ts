@@ -71,3 +71,29 @@ export type LoginResponse = {
   expiresAt: string;
   user: Principal;
 };
+
+export type UserRecord = {
+  userId: string;
+  username: string;
+  displayName: string;
+  isActive: boolean;
+  groups: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt: string | null;
+};
+
+export type GroupRecord = {
+  groupId: string;
+  name: string;
+  displayName: string;
+  description: string;
+  isBuiltin: boolean;
+  isActive: boolean;
+  permissions: string[];
+};
+
+export type PermissionRecord = {
+  code: string;
+  description: string;
+};

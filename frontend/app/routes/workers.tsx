@@ -2,12 +2,15 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { del, getJSON, getToken, postJSON } from "@/lib/api";
+import { currentUser, hasPermission } from "@/lib/auth";
 import type { Worker } from "@/lib/types";
 import { Badge, Button, Card, statusTone } from "@/components/ui";
 
 export default function WorkersPage() {
   const qc = useQueryClient();
   const [showDialog, setShowDialog] = useState(false);
+  const me = useQuery({ queryKey: ["me"], queryFn: currentUser });
+  const canManageWorkers = hasPermission(me.data, "workers.manage");
   const { data } = useQuery({
     queryKey: ["workers"],
     queryFn: () => getJSON<{ workers: Worker[] }>("/api/workers"),
@@ -29,7 +32,7 @@ export default function WorkersPage() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-medium tracking-tight">机器</h1>
-        <Button onClick={() => setShowDialog(true)}>添加机器</Button>
+        {canManageWorkers && <Button onClick={() => setShowDialog(true)}>添加机器</Button>}
       </div>
 
       <Card className="p-0 overflow-hidden">
@@ -50,12 +53,16 @@ export default function WorkersPage() {
                 <td className="px-4 py-2"><Badge tone={statusTone(w.status)}>{w.status}</Badge></td>
                 <td className="px-4 py-2 text-muted-foreground">{w.slotsUsed}/{w.slotsTotal}</td>
                 <td className="px-4 py-2">
-                  <Button variant="ghost" onClick={() => toggle.mutate(w)}>
-                    {w.enabled ? "已启用" : "已禁用"}
-                  </Button>
+                  {canManageWorkers ? (
+                    <Button variant="ghost" onClick={() => toggle.mutate(w)}>
+                      {w.enabled ? "已启用" : "已禁用"}
+                    </Button>
+                  ) : (
+                    <span className="text-muted-foreground">{w.enabled ? "已启用" : "已禁用"}</span>
+                  )}
                 </td>
                 <td className="px-4 py-2 text-right">
-                  <Button variant="danger" onClick={() => remove.mutate(w.workerId)}>删除</Button>
+                  {canManageWorkers && <Button variant="danger" onClick={() => remove.mutate(w.workerId)}>删除</Button>}
                 </td>
               </tr>
             ))}
@@ -66,14 +73,14 @@ export default function WorkersPage() {
         </table>
       </Card>
 
-      {showDialog && <AddMachineDialog onClose={() => setShowDialog(false)} />}
+      {showDialog && canManageWorkers && <AddMachineDialog onClose={() => setShowDialog(false)} />}
     </div>
   );
 }
 
 function AddMachineDialog({ onClose }: { onClose: () => void }) {
   const token = getToken();
-  const command = `curl -fsSL "${window.location.origin}/api/workers/enroll.sh?token=${token}" | bash`;
+  const command = `curl -fsSL -H "Authorization: Bearer ${token}" "${window.location.origin}/api/workers/enroll.sh" | bash`;
   return (
     <div className="fixed inset-0 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <Card className="max-w-2xl space-y-3 shadow-lg" onClick={(e) => e.stopPropagation()}>
