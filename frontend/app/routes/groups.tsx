@@ -2,7 +2,7 @@ import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { X } from "lucide-react";
-import { del, getJSON, patchJSON, postJSON, putJSON } from "@/lib/api";
+import { getJSON, patchJSON, postJSON, putJSON } from "@/lib/api";
 import type { GroupRecord, PermissionRecord } from "@/lib/types";
 import { Badge, Button, Card, Input } from "@/components/ui";
 import { cn } from "@/lib/utils";
@@ -76,12 +76,6 @@ export default function GroupsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["groups"] }),
     onError: (error) => toast.error((error as Error).message),
   });
-  const remove = useMutation({
-    mutationFn: (id: string) => del(`/api/groups/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["groups"] }),
-    onError: (error) => toast.error((error as Error).message),
-  });
-
   function onCreateSubmit(event: FormEvent) {
     event.preventDefault();
     create.mutate();
@@ -156,19 +150,11 @@ export default function GroupsPage() {
                     </Button>
                     <Button
                       className="h-8 px-3"
-                      variant="ghost"
+                      variant="danger"
                       disabled={group.isBuiltin || !group.isActive}
                       onClick={() => disable.mutate(group.groupId)}
                     >
                       禁用
-                    </Button>
-                    <Button
-                      className="h-8 px-3"
-                      variant="danger"
-                      disabled={group.isBuiltin || !group.isActive}
-                      onClick={() => remove.mutate(group.groupId)}
-                    >
-                      删除
                     </Button>
                   </div>
                 </td>
