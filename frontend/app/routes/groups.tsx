@@ -118,25 +118,32 @@ export default function GroupsPage() {
         <Button onClick={() => setCreateOpen(true)}>创建用户组</Button>
       </div>
 
-      <Card className="overflow-hidden p-0">
-        <table className="w-full text-sm">
+      <Card className="overflow-x-auto p-0">
+        <table className="w-full min-w-[56rem] text-sm">
           <thead className="border-b border-border text-left text-muted-foreground">
             <tr>
-              <th className="px-4 h-11 font-medium">用户组名字</th>
+              <th className="px-4 h-11 font-medium whitespace-nowrap">用户组名</th>
+              <th className="px-4 h-11 font-medium whitespace-nowrap">用户组展示名称</th>
+              <th className="px-4 h-11 font-medium whitespace-nowrap">是否内置</th>
+              <th className="px-4 h-11 font-medium whitespace-nowrap">是否启用</th>
               <th className="px-4 h-11 font-medium">描述</th>
-              <th className="px-4 h-11 font-medium">操作</th>
+              <th className="px-4 h-11 font-medium whitespace-nowrap">操作</th>
             </tr>
           </thead>
           <tbody>
             {groups.data?.groups.map((group) => (
               <tr key={group.groupId} className="border-t border-border">
+                <td className="px-4 py-3 font-mono text-xs">{group.name}</td>
+                <td className="px-4 py-3 font-medium">{group.displayName}</td>
                 <td className="px-4 py-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">{group.displayName}</span>
-                    {group.isBuiltin && <Badge tone="blue">内置</Badge>}
-                    <Badge tone={group.isActive ? "green" : "red"}>{group.isActive ? "启用" : "禁用"}</Badge>
-                  </div>
-                  <div className="mt-1 text-xs text-muted-foreground">{group.name}</div>
+                  {group.isBuiltin ? (
+                    <Badge tone="blue">是</Badge>
+                  ) : (
+                    <span className="text-muted-foreground">否</span>
+                  )}
+                </td>
+                <td className="px-4 py-3">
+                  <Badge tone={group.isActive ? "green" : "red"}>{group.isActive ? "是" : "否"}</Badge>
                 </td>
                 <td className="px-4 py-3 text-muted-foreground">{group.description || "-"}</td>
                 <td className="px-4 py-3">
@@ -169,7 +176,7 @@ export default function GroupsPage() {
             ))}
             {groups.data?.groups.length === 0 && (
               <tr>
-                <td className="px-4 py-3 text-muted-foreground" colSpan={3}>
+                <td className="px-4 py-3 text-muted-foreground" colSpan={6}>
                   暂无用户组
                 </td>
               </tr>
