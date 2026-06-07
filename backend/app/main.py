@@ -22,6 +22,10 @@ def _service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mgr: OrchestrationManager | None = None
+    with get_session() as session:
+        from app.model import repo_auth
+
+        repo_auth.bootstrap_rbac(session)
     if not os.environ.get("AEO_DISABLE_ORCHESTRATION"):
         mgr = OrchestrationManager([
             lambda stop: scheduler.run_loop(stop, get_session, interval=5),

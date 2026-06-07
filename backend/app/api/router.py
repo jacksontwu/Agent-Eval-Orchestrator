@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import require_token
 from app.api.routes import (
+    auth,
     batches,
     case_runs,
     dashboard,
@@ -18,6 +19,7 @@ from app.api.routes import (
 
 api_router = APIRouter(prefix="/api")
 api_router.include_router(health.router, tags=["health"])
+api_router.include_router(auth.router, tags=["auth"])
 
 # Authenticated sub-routers are registered in app.main with a shared token dependency.
 authed_router = APIRouter(dependencies=[Depends(require_token)])
