@@ -1,18 +1,21 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import {
   CirclePlus,
   ClipboardList,
   ChevronLeft,
+  ChevronDown,
+  ChevronUp,
   HardDrive,
   LogOut,
   Menu,
   Moon,
   Shield,
   Sun,
-  Users,
+  UserRound,
+  UsersRound,
   type LucideIcon,
 } from "lucide-react";
 import { currentUser, hasPermission, logout } from "@/lib/auth";
@@ -28,14 +31,14 @@ type NavItem = {
 };
 
 const baseNavItems: NavItem[] = [
-  { to: "/", label: "任务", end: true, permission: "tasks.read_own", icon: ClipboardList },
+  { to: "/", label: "查看任务", end: true, permission: "tasks.read_own", icon: ClipboardList },
   { to: "/create", label: "新建任务", permission: "tasks.create", icon: CirclePlus },
-  { to: "/workers", label: "机器", permission: "workers.read", icon: HardDrive },
+  { to: "/workers", label: "机器管理", permission: "workers.read", icon: HardDrive },
 ];
 
-const adminNavItems: NavItem[] = [
-  { to: "/users", label: "用户", permission: "users.manage", icon: Users },
-  { to: "/groups", label: "组", permission: "groups.manage", icon: Shield },
+const permissionNavItems: NavItem[] = [
+  { to: "/users", label: "用户管理", permission: "users.manage", icon: UserRound },
+  { to: "/groups", label: "用户组管理", permission: "groups.manage", icon: UsersRound },
 ];
 
 function useTheme() {
@@ -96,11 +99,24 @@ export default function Root() {
 
 function AuthedShell({ isDark, toggleTheme }: { isDark: boolean; toggleTheme: () => void }) {
   const { isCollapsed, toggle } = useSidebar();
+  const location = useLocation();
   const userQuery = useQuery({ queryKey: ["me"], queryFn: currentUser, retry: false });
   const user = userQuery.data;
-  const navItems = [...baseNavItems, ...adminNavItems].filter((item) =>
+  const navItems = baseNavItems.filter((item) =>
     hasPermission(user, item.permission),
   );
+  const permissionItems = permissionNavItems.filter((item) => hasPermission(user, item.permission));
+  const permissionEntry = permissionItems[0];
+  const isPermissionActive = permissionItems.some((item) =>
+    location.pathname.startsWith(item.to),
+  );
+  const [permissionOpen, setPermissionOpen] = useState(isPermissionActive);
+
+  useEffect(() => {
+    if (isPermissionActive) {
+      setPermissionOpen(true);
+    }
+  }, [isPermissionActive]);
 
   if (userQuery.isLoading) {
     return (
@@ -171,22 +187,74 @@ function AuthedShell({ isDark, toggleTheme }: { isDark: boolean; toggleTheme: ()
               </NavLink>
             );
           })}
+          {permissionEntry && (
+            <div className="space-y-[10px]">
+              <button
+                type="button"
+                onClick={() => {
+                  if (isCollapsed) {
+                    toggle();
+                    setPermissionOpen(true);
+                    return;
+                  }
+                  setPermissionOpen((value) => !value);
+                }}
+                title={isCollapsed ? "权限控制" : undefined}
+                className={cn(
+                  "flex h-10 w-full items-center gap-3 rounded-md px-2 text-left text-sm transition-colors",
+                  isCollapsed && "justify-center px-0",
+                  isPermissionActive
+                    ? "bg-[#303030] text-white"
+                    : "text-zinc-300 hover:bg-[#262626] hover:text-white",
+                )}
+              >
+                <Shield className="size-4 shrink-0" />
+                {!isCollapsed && <span className="truncate">权限控制</span>}
+                {!isCollapsed &&
+                  (permissionOpen ? (
+                    <ChevronUp className="ml-auto size-4 shrink-0" />
+                  ) : (
+                    <ChevronDown className="ml-auto size-4 shrink-0" />
+                  ))}
+              </button>
+              {!isCollapsed && permissionOpen && (
+                <div className="space-y-[10px] pl-7">
+                  {permissionItems.map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <NavLink
+                        key={item.to}
+                        to={item.to}
+                        className={({ isActive }) =>
+                          cn(
+                            "flex h-8 items-center gap-2 rounded-md px-2 text-xs transition-colors",
+                            isActive
+                              ? "bg-[#303030] text-white"
+                              : "text-zinc-400 hover:bg-[#262626] hover:text-white",
+                          )
+                        }
+                      >
+                        <Icon className="size-3.5 shrink-0" />
+                        <span className="truncate">{item.label}</span>
+                      </NavLink>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </nav>
 
         <div className="border-t border-[#2b2b2b] p-2">
-          {!isCollapsed && (
-            <div className="mb-2 truncate px-2 text-xs text-zinc-400">{user?.username}</div>
-          )}
-          <div className={cn("flex gap-1", isCollapsed && "flex-col items-center")}>
-            <button
-              type="button"
-              onClick={toggleTheme}
-              title="切换主题"
-              aria-label="切换主题"
-              className="inline-flex size-8 items-center justify-center rounded-full text-zinc-300 transition-colors hover:bg-[#2a2a2a] hover:text-white"
-            >
-              {isDark ? <Moon className="size-4" /> : <Sun className="size-4" />}
-            </button>
+          <div
+            className={cn(
+              "flex items-center gap-2",
+              isCollapsed ? "justify-center" : "justify-between",
+            )}
+          >
+            {!isCollapsed && (
+              <div className="min-w-0 truncate px-2 text-sm text-zinc-300">{user?.username}</div>
+            )}
             <button
               type="button"
               onClick={logout}
@@ -215,6 +283,15 @@ function AuthedShell({ isDark, toggleTheme }: { isDark: boolean; toggleTheme: ()
           <div className="font-mono text-sm font-semibold tracking-normal text-muted-foreground">
             Agent Eval Orchestrator
           </div>
+          <button
+            type="button"
+            onClick={toggleTheme}
+            title="切换主题"
+            aria-label="切换主题"
+            className="ml-auto inline-flex size-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            {isDark ? <Moon className="size-4" /> : <Sun className="size-4" />}
+          </button>
         </div>
         <div className="mx-auto max-w-6xl px-6 pb-8 pt-18">
           <Outlet />
