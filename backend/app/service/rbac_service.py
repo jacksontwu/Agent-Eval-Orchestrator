@@ -3,10 +3,11 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.core.ids import now_iso
+from app.core.permissions import PermissionCode
 from app.core.security import hash_password
 from app.model import repo_auth
-from app.model.tables import User
-from app.service.errors import ConflictError, NotFoundError
+from app.model.tables import Group, User
+from app.service.errors import ConflictError, NotFoundError, ServiceError
 
 
 def user_to_read(session: Session, user: User) -> dict:
@@ -85,3 +86,90 @@ def reset_password(session: Session, user_id: str, password: str) -> None:
     user.password_hash = hash_password(password)
     user.updated_at = now_iso()
     session.commit()
+
+
+def group_to_read(session: Session, group: Group) -> dict:
+    return {
+        "group_id": group.group_id,
+        "name": group.name,
+        "display_name": group.display_name,
+        "description": group.description,
+        "is_builtin": bool(group.is_builtin),
+        "is_active": bool(group.is_active),
+        "permissions": sorted(repo_auth.permissions_for_group(session, group.name)),
+    }
+
+
+def list_groups(session: Session) -> list[dict]:
+    return [group_to_read(session, group) for group in repo_auth.list_groups(session)]
+
+
+def list_permissions(session: Session) -> list[dict]:
+    return [{"code": item.code, "description": item.description} for item in repo_auth.list_permissions(session)]
+
+
+def create_group(session: Session, *, name: str, display_name: str, description: str) -> dict:
+    if repo_auth.get_group_by_name(session, name) is not None:
+        raise ConflictError(f"group already exists: {name}")
+    group = repo_auth.create_group(session, name=name, display_name=display_name, description=description)
+    session.commit()
+    return group_to_read(session, group)
+
+
+def _require_group(session: Session, group_id: str) -> Group:
+    group = repo_auth.get_group(session, group_id)
+    if group is None:
+        raise NotFoundError(f"group not found: {group_id}")
+    return group
+
+
+def get_group_read(session: Session, group_id: str) -> dict:
+    return group_to_read(session, _require_group(session, group_id))
+
+
+def update_group(
+    session: Session,
+    group_id: str,
+    *,
+    display_name: str | None,
+    description: str | None,
+    is_active: bool | None,
+) -> dict:
+    group = _require_group(session, group_id)
+    if group.is_builtin and is_active is False:
+        raise ServiceError(f"builtin group cannot be disabled: {group.name}")
+    if display_name is not None:
+        group.display_name = display_name
+    if description is not None:
+        group.description = description
+    if is_active is not None:
+        group.is_active = is_active
+    group.updated_at = now_iso()
+    session.commit()
+    return group_to_read(session, group)
+
+
+def disable_group(session: Session, group_id: str) -> None:
+    group = _require_group(session, group_id)
+    if group.is_builtin:
+        raise ServiceError(f"builtin group cannot be deleted: {group.name}")
+    group.is_active = False
+    group.updated_at = now_iso()
+    session.commit()
+
+
+def set_group_permissions(session: Session, group_id: str, permissions: list[str]) -> dict:
+    group = _require_group(session, group_id)
+    permission_set = set(permissions)
+    if group.name == "admin" and not {PermissionCode.USERS_MANAGE, PermissionCode.GROUPS_MANAGE}.issubset(
+        permission_set
+    ):
+        raise ServiceError("admin group must keep users.manage and groups.manage")
+    if group.name == "bot" and not {PermissionCode.WORKER_PROTOCOL_USE, PermissionCode.ASSETS_USE}.issubset(
+        permission_set
+    ):
+        raise ServiceError("bot group must keep worker_protocol.use and assets.use")
+    repo_auth.set_group_permissions(session, group_id, permissions)
+    group.updated_at = now_iso()
+    session.commit()
+    return group_to_read(session, group)

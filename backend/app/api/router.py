@@ -9,6 +9,7 @@ from app.api.routes import (
     datasets,
     enroll,
     files,
+    groups,
     harbor_viewer,
     health,
     runs,
@@ -25,6 +26,7 @@ api_router.include_router(auth.router, tags=["auth"])
 authed_router = APIRouter(dependencies=[Depends(require_current_principal)])
 authed_router.include_router(templates.router, tags=["templates"])
 authed_router.include_router(users.router, tags=["users"])
+authed_router.include_router(groups.router, tags=["groups"])
 authed_router.include_router(workers.router, tags=["workers"])
 authed_router.include_router(datasets.router, tags=["datasets"])
 authed_router.include_router(dashboard.router, tags=["dashboard"])
