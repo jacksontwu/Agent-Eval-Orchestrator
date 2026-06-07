@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     allow_no_auth: bool = Field(default=False, alias="AEO_ALLOW_NO_AUTH")
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
     frontend_dist: str = Field(default="frontend/dist", alias="AEO_FRONTEND_DIST")
+    admin_username: str | None = Field(default=None, alias="AEO_ADMIN_USERNAME")
+    admin_password: str | None = Field(default=None, alias="AEO_ADMIN_PASSWORD")
+    bot_username: str | None = Field(default=None, alias="AEO_BOT_USERNAME")
+    bot_password: str | None = Field(default=None, alias="AEO_BOT_PASSWORD")
+    auth_secret: str | None = Field(default=None, alias="AEO_AUTH_SECRET")
+    access_token_ttl_minutes: int = Field(default=480, alias="AEO_ACCESS_TOKEN_TTL_MINUTES")
 
     @model_validator(mode="after")
     def _finalize(self) -> "Settings":
