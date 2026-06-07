@@ -15,13 +15,12 @@ def _controller_url(request: Request) -> str:
 
 
 @router.get("/workers/enroll.sh")
-def enroll_script(request: Request, token: str | None = Query(default=None),
-                  worker_id: str | None = Query(default=None, alias="workerId")) -> PlainTextResponse:
+def enroll_script(request: Request, worker_id: str | None = Query(default=None, alias="workerId")) -> PlainTextResponse:
     settings = get_settings()
-    effective_token = token or settings.token or ""
     script = enroll_service.render_enroll_script(
         controller_url=_controller_url(request),
-        token=effective_token,
+        bot_username=settings.bot_username or "",
+        bot_password=settings.bot_password or "",
         worker_id=worker_id or new_id("worker"),
     )
     return PlainTextResponse(script, media_type="text/x-shellscript")

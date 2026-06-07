@@ -3,7 +3,8 @@
 set -euo pipefail
 
 CONTROLLER_URL="{{CONTROLLER_URL}}"
-TOKEN="{{TOKEN}}"
+AEO_BOT_USERNAME="{{BOT_USERNAME}}"
+AEO_BOT_PASSWORD="{{BOT_PASSWORD}}"
 WORKER_ID="{{WORKER_ID}}"
 WORK_DIR="${AEO_WORKER_DIR:-$HOME/aeo-worker}"
 
@@ -23,8 +24,16 @@ fi
 
 # 3. Pull the project + Harbor code bundle from the controller (no GitHub dependency).
 mkdir -p "${WORK_DIR}"
+echo "[enroll] logging in as bot ..."
+LOGIN_RESPONSE="$(curl -fsSL \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"${AEO_BOT_USERNAME}\",\"password\":\"${AEO_BOT_PASSWORD}\"}" \
+  "${CONTROLLER_URL}/api/auth/login")"
+ACCESS_TOKEN="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["accessToken"])' <<< "${LOGIN_RESPONSE}")"
+
 echo "[enroll] downloading code bundle ..."
-curl -fsSL "${CONTROLLER_URL}/api/workers/code-bundle?token=${TOKEN}" -o "${WORK_DIR}/code-bundle.tar.gz"
+curl -fsSL -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+  "${CONTROLLER_URL}/api/workers/code-bundle" -o "${WORK_DIR}/code-bundle.tar.gz"
 tar -xzf "${WORK_DIR}/code-bundle.tar.gz" -C "${WORK_DIR}"
 
 # 4. Install Python dependencies.
@@ -36,7 +45,8 @@ echo "[enroll] starting worker daemon ..."
 nohup uv run python -m app.worker.daemon \
   --controller-url "${CONTROLLER_URL}" \
   --worker-id "${WORKER_ID}" \
-  --auth-token "${TOKEN}" \
+  --bot-username "${AEO_BOT_USERNAME}" \
+  --bot-password "${AEO_BOT_PASSWORD}" \
   >> "${WORK_DIR}/worker.log" 2>&1 &
 
 echo "[enroll] done. tailing logs: tail -f ${WORK_DIR}/worker.log"

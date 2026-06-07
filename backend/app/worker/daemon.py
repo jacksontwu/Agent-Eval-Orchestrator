@@ -19,7 +19,7 @@ from urllib import request
 
 from app.schema.assets import AssetManifest
 
-TOKEN_HEADER = "X-AEO-Token"
+AUTH_HEADER = "Authorization"
 
 
 # --- low-level HTTP (patchable in tests) -----------------------------------
@@ -31,9 +31,23 @@ def _urlopen(req: request.Request, timeout: float = 60.0):  # pragma: no cover -
 def _http_get(url: str, token: str | None = None) -> bytes:
     req = request.Request(url, method="GET")
     if token:
-        req.add_header(TOKEN_HEADER, token)
+        req.add_header(AUTH_HEADER, f"Bearer {token}")
     with _urlopen(req) as resp:
         return resp.read()
+
+
+def login(controller_url: str, username: str, password: str) -> str:
+    body = json.dumps({"username": username, "password": password}).encode("utf-8")
+    req = request.Request(
+        f"{controller_url.rstrip('/')}/api/auth/login",
+        data=body,
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    with _urlopen(req) as resp:
+        raw = resp.read()
+    payload = json.loads(raw)
+    return str(payload["accessToken"])
 
 
 def post_json(url: str, payload: dict[str, Any], token: str | None = None) -> dict[str, Any]:
@@ -41,7 +55,7 @@ def post_json(url: str, payload: dict[str, Any], token: str | None = None) -> di
     req = request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     if token:
-        req.add_header(TOKEN_HEADER, token)
+        req.add_header(AUTH_HEADER, f"Bearer {token}")
     with _urlopen(req) as resp:
         raw = resp.read()
     return json.loads(raw) if raw else {}
@@ -105,7 +119,7 @@ def upload_archive(controller_url: str, *, batch_id: str, job_dir: Path,
     req = request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     if token:
-        req.add_header(TOKEN_HEADER, token)
+        req.add_header(AUTH_HEADER, f"Bearer {token}")
     with _urlopen(req) as resp:
         raw = resp.read()
     return json.loads(raw) if raw else {}
@@ -132,10 +146,13 @@ def _build_multipart(boundary: str, *, fields: dict[str, str], file_field: str,
 # --- poll loop --------------------------------------------------------------
 
 def run_forever(*, controller_url: str, worker_id: str, display_name: str, host: str,
-                slots_total: int, token: str | None, shared_root: Path,
+                slots_total: int, shared_root: Path, token: str | None = None,
+                bot_username: str | None = None, bot_password: str | None = None,
                 executor_run: Callable[[dict[str, Any], Path], Path],
                 poll_interval: float = 5.0, stop: Callable[[], bool] | None = None) -> None:  # pragma: no cover
     base = controller_url.rstrip("/")
+    if not token and bot_username and bot_password:
+        token = login(base, bot_username, bot_password)
     post_json(f"{base}/api/workers/register", {
         "workerId": worker_id, "displayName": display_name, "host": host,
         "slotsTotal": slots_total,

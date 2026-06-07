@@ -28,6 +28,21 @@ def test_enroll_script(dev_client):
     assert "/api/workers/code-bundle" in body
 
 
+def test_enroll_script_uses_bot_credentials(dev_client, monkeypatch):
+    monkeypatch.setenv("AEO_BOT_USERNAME", "worker-bot")
+    monkeypatch.setenv("AEO_BOT_PASSWORD", "bot-secret")
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+
+    resp = dev_client.get("/api/workers/enroll.sh")
+
+    assert resp.status_code == 200
+    text = resp.text
+    assert 'AEO_BOT_USERNAME="worker-bot"' in text
+    assert 'AEO_BOT_PASSWORD="bot-secret"' in text
+    assert "AEO_TOKEN" not in text
+
+
 def test_enroll_requires_bearer(session, monkeypatch):
     monkeypatch.setenv("AEO_AUTH_SECRET", "unit-secret-with-at-least-32-bytes")
     monkeypatch.setenv("AEO_DISABLE_ORCHESTRATION", "1")
