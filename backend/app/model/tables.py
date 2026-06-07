@@ -2,11 +2,60 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, Float, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.ids import now_iso
 from app.model.base import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=now_iso)
+    last_login_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class Group(Base):
+    __tablename__ = "groups"
+    group_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=now_iso)
+
+
+class Permission(Base):
+    __tablename__ = "permissions"
+    permission_id: Mapped[str] = mapped_column(String, primary_key=True)
+    code: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class UserGroup(Base):
+    __tablename__ = "user_groups"
+    __table_args__ = (UniqueConstraint("user_id", "group_id", name="uq_user_groups_user_group"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+
+
+class GroupPermission(Base):
+    __tablename__ = "group_permissions"
+    __table_args__ = (
+        UniqueConstraint("group_id", "permission_id", name="uq_group_permissions_group_permission"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    permission_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
 
 
 class TaskTemplate(Base):
