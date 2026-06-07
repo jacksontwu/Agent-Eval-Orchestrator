@@ -67,3 +67,30 @@ def test_login_rejects_bad_password(monkeypatch, session):
     resp = client.post("/api/auth/login", json={"username": "alice", "password": "wrong"})
 
     assert resp.status_code == 401
+
+
+def test_protected_route_requires_bearer_token(monkeypatch, session):
+    monkeypatch.setenv("AEO_AUTH_SECRET", UNIT_SECRET)
+    monkeypatch.setenv("AEO_DISABLE_ORCHESTRATION", "1")
+    get_settings.cache_clear()
+    app = create_app()
+    app.dependency_overrides[db_session] = lambda: session
+    client = TestClient(app)
+
+    resp = client.get("/api/task-templates")
+
+    assert resp.status_code == 401
+
+
+def test_old_shared_token_header_no_longer_authorizes(monkeypatch, session):
+    monkeypatch.setenv("AEO_TOKEN", "secret")
+    monkeypatch.setenv("AEO_AUTH_SECRET", UNIT_SECRET)
+    monkeypatch.setenv("AEO_DISABLE_ORCHESTRATION", "1")
+    get_settings.cache_clear()
+    app = create_app()
+    app.dependency_overrides[db_session] = lambda: session
+    client = TestClient(app)
+
+    resp = client.get("/api/task-templates", headers={"X-AEO-Token": "secret"})
+
+    assert resp.status_code == 401
