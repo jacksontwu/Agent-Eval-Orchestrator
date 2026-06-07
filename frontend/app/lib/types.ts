@@ -57,3 +57,17 @@ export interface RunDetail {
   rerunStatus: string;
   batches: Batch[];
 }
+
+export type Principal = {
+  username: string;
+  source: "config" | "db" | "dev";
+  groups: string[];
+  permissions: string[];
+};
+
+export type LoginResponse = {
+  accessToken: string;
+  tokenType: "bearer";
+  expiresAt: string;
+  user: Principal;
+};

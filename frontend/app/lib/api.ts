@@ -1,17 +1,15 @@
-const TOKEN_KEY = "aeo_token";
+const TOKEN_KEY = "aeo_access_token";
 
 export function getToken(): string {
-  const url = new URL(window.location.href);
-  const fromUrl = url.searchParams.get("token");
-  if (fromUrl) {
-    localStorage.setItem(TOKEN_KEY, fromUrl);
-    return fromUrl;
-  }
   return localStorage.getItem(TOKEN_KEY) ?? "";
 }
 
 export function setToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
 }
 
 export class ApiError extends Error {
@@ -23,8 +21,14 @@ export class ApiError extends Error {
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   const token = getToken();
-  if (token) headers.set("X-AEO-Token", token);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   const resp = await fetch(path, { ...init, headers });
+  if (resp.status === 401) {
+    clearToken();
+    if (!window.location.pathname.startsWith("/login")) {
+      window.location.assign("/login");
+    }
+  }
   if (!resp.ok) {
     let detail = resp.statusText;
     try {
@@ -46,6 +50,24 @@ export async function getJSON<T>(path: string): Promise<T> {
 export async function postJSON<T>(path: string, body: unknown): Promise<T> {
   const resp = await apiFetch(path, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return (await resp.json()) as T;
+}
+
+export async function patchJSON<T>(path: string, body: unknown): Promise<T> {
+  const resp = await apiFetch(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return (await resp.json()) as T;
+}
+
+export async function putJSON<T>(path: string, body: unknown): Promise<T> {
+  const resp = await apiFetch(path, {
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });

@@ -7,12 +7,10 @@ import TasksPage from "./routes/tasks";
 import CreatePage from "./routes/create";
 import TaskDetailPage from "./routes/task-detail";
 import WorkersPage from "./routes/workers";
-import { getToken } from "@/lib/api";
-
-// Persist a ?token= param on first load.
-getToken();
+import LoginPage from "./routes/login";
 
 const router = createBrowserRouter([
+  { path: "/login", element: <LoginPage /> },
   {
     path: "/",
     element: <Root />,

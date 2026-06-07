@@ -1,15 +1,28 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { Toaster } from "sonner";
-import { Moon, Sun } from "lucide-react";
+import { LogOut, Moon, Sun } from "lucide-react";
+import { currentUser, hasPermission, logout } from "@/lib/auth";
 import { queryClient } from "@/lib/query";
 import { cn } from "@/lib/utils";
 
-const navItems = [
-  { to: "/", label: "任务", end: true },
-  { to: "/create", label: "新建任务" },
-  { to: "/workers", label: "机器" },
+type NavItem = {
+  to: string;
+  label: string;
+  permission: string;
+  end?: boolean;
+};
+
+const baseNavItems: NavItem[] = [
+  { to: "/", label: "任务", end: true, permission: "tasks.read_own" },
+  { to: "/create", label: "新建任务", permission: "tasks.create" },
+  { to: "/workers", label: "机器", permission: "workers.read" },
+];
+
+const adminNavItems: NavItem[] = [
+  { to: "/users", label: "用户", permission: "users.manage" },
+  { to: "/groups", label: "组", permission: "groups.manage" },
 ];
 
 function useTheme() {
@@ -29,45 +42,7 @@ export default function Root() {
   const { isDark, toggle } = useTheme();
   return (
     <QueryClientProvider client={queryClient}>
-      <div className="min-h-screen">
-        <header className="border-b border-border bg-background">
-          <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 h-14">
-            <span className="font-mono text-sm font-medium tracking-tight">
-              Agent Eval Orchestrator
-            </span>
-            <nav className="flex gap-1">
-              {navItems.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    cn(
-                      "rounded-md px-3 py-1.5 text-sm transition-colors",
-                      isActive
-                        ? "bg-accent text-accent-foreground"
-                        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                    )
-                  }
-                >
-                  {item.label}
-                </NavLink>
-              ))}
-            </nav>
-            <button
-              type="button"
-              onClick={toggle}
-              aria-label="切换主题"
-              className="ml-auto inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-            >
-              {isDark ? <Moon className="size-4" /> : <Sun className="size-4" />}
-            </button>
-          </div>
-        </header>
-        <main className="mx-auto max-w-6xl px-6 py-8">
-          <Outlet />
-        </main>
-      </div>
+      <AuthedShell isDark={isDark} toggleTheme={toggle} />
       <Toaster
         position="top-right"
         theme={isDark ? "dark" : "light"}
@@ -85,5 +60,72 @@ export default function Root() {
         }}
       />
     </QueryClientProvider>
+  );
+}
+
+function AuthedShell({ isDark, toggleTheme }: { isDark: boolean; toggleTheme: () => void }) {
+  const userQuery = useQuery({ queryKey: ["me"], queryFn: currentUser, retry: false });
+  const user = userQuery.data;
+  const navItems = [...baseNavItems, ...adminNavItems].filter((item) =>
+    hasPermission(user, item.permission),
+  );
+
+  if (userQuery.isLoading) {
+    return (
+      <div className="min-h-screen">
+        <main className="mx-auto max-w-6xl px-6 py-8 text-sm text-muted-foreground">加载中…</main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen">
+      <header className="border-b border-border bg-background">
+        <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 h-14">
+          <span className="font-mono text-sm font-medium tracking-tight">
+            Agent Eval Orchestrator
+          </span>
+          <nav className="flex gap-1">
+            {navItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  cn(
+                    "rounded-md px-3 py-1.5 text-sm transition-colors",
+                    isActive
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  )
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+          <span className="ml-auto text-xs text-muted-foreground">{user?.username}</span>
+          <button
+            type="button"
+            onClick={toggleTheme}
+            aria-label="切换主题"
+            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            {isDark ? <Moon className="size-4" /> : <Sun className="size-4" />}
+          </button>
+          <button
+            type="button"
+            onClick={logout}
+            aria-label="退出登录"
+            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          >
+            <LogOut className="size-4" />
+          </button>
+        </div>
+      </header>
+      <main className="mx-auto max-w-6xl px-6 py-8">
+        <Outlet />
+      </main>
+    </div>
   );
 }
