@@ -133,6 +133,15 @@ def _rebuild_merged_job_for_run(
                 shutil.rmtree(legacy_batch_dir)
 
 
+def _run_uses_jobs_dir(*, store: Store, run: dict[str, object], jobs_dir: Path) -> bool:
+    template_id = str(run.get("template_id") or "").strip()
+    template = store.get_task_template(template_id) if template_id else None
+    executor_config = (template or {}).get("executor_config") or {}
+    raw_jobs_dir = str(executor_config.get("combinedJobsDir") or DEFAULT_JOBS_DIR).strip()
+    configured_jobs_dir = Path(raw_jobs_dir).expanduser().resolve()
+    return configured_jobs_dir == jobs_dir.expanduser().resolve()
+
+
 def _apply_exception_rerun_merge(
     *,
     store: Store,
@@ -335,6 +344,8 @@ class Handler(BaseHTTPRequestHandler):
         jobs_dir.mkdir(parents=True, exist_ok=True)
         merged_names: list[str] = []
         for run in self.store.list_runs():
+            if not _run_uses_jobs_dir(store=self.store, run=run, jobs_dir=jobs_dir):
+                continue
             grouped_sources = _job_sources_for_run(
                 store=self.store,
                 run_id=str(run["run_id"]),
