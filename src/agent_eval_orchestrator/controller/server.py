@@ -40,6 +40,7 @@ from agent_eval_orchestrator.controller.harbor_yaml import (
     parse_harbor_yaml,
 )
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
+from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.normalizers.harbor import normalize_harbor_job
 from agent_eval_orchestrator.normalizers.harbor_job_merge import (
     copy_trial_dirs,
@@ -839,11 +840,9 @@ class Handler(BaseHTTPRequestHandler):
                 task_sources=task_sources,
             )
             yaml_by_batch_id = {}
-            combined_jobs_dir = ""
+            combined_jobs_dir = str(derived_jobs_dir_for_run(store=self.store, run=run))
             for batch in batches:
                 jobs_dir = Path(str(batch["batch_root"])) / "harbor" / "jobs"
-                if not combined_jobs_dir:
-                    combined_jobs_dir = str(jobs_dir)
                 worker_id = str(batch["preferred_worker_id"])
                 worker_dataset_path = str(Path(str(manifest["workers"][worker_id]["targetRoot"])) / "dataset")
                 yaml_by_batch_id[str(batch["batch_id"])] = build_batch_harbor_yaml(

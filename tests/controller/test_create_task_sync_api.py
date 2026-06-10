@@ -8,6 +8,7 @@ from threading import Thread
 import yaml
 
 from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
+from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.controller.server import Handler, ThreadedServer
 from agent_eval_orchestrator.storage.store import Store
 
@@ -205,6 +206,11 @@ datasets:
     assert config["harborYamlMode"] == "datasets"
     assert sorted(config["harborYamlByBatchId"]) == sorted(batch["batch_id"] for batch in payload["batches"])
     assert "bitfunCliPath" not in config
+    assert config["combinedJobsDir"] == str(derived_jobs_dir_for_run(store=store, run=payload["run"]))
+    assert all(
+        config["combinedJobsDir"] != str(Path(batch["batch_root"]) / "harbor" / "jobs")
+        for batch in payload["batches"]
+    )
     workers_by_id = {"local-a": tmp_path / "runtime-a", "local-b": tmp_path / "runtime-b"}
     for batch in payload["batches"]:
         worker_id = batch["preferred_worker_id"]
