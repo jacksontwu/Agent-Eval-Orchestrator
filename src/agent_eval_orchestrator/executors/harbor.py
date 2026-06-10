@@ -67,6 +67,85 @@ class HarborExecutor(Executor):
         value = str(mapping[worker_id] or "").strip()
         return value or None
 
+    def _prepare_from_harbor_yaml(
+        self,
+        *,
+        batch: dict[str, Any],
+        executor_config: dict[str, Any],
+        local_root: Path,
+        shared_root: Path | None,
+    ) -> PreparedBatch:
+        batch_id = str(batch["batch_id"])
+        batch_root = Path(str(batch["batch_root"])).resolve()
+        batch_root.mkdir(parents=True, exist_ok=True)
+        yaml_by_batch = executor_config.get("harborYamlByBatchId")
+        if not isinstance(yaml_by_batch, dict) or batch_id not in yaml_by_batch:
+            raise RuntimeError(f"missing harborYamlByBatchId for batch: {batch_id}")
+        harbor_yaml = str(yaml_by_batch[batch_id])
+        config_path = batch_root / "harbor-config.yaml"
+        config_path.write_text(harbor_yaml, encoding="utf-8")
+
+        jobs_dir = batch_root / "harbor" / "jobs"
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        job_name = str(executor_config.get("harborYamlGeneratedJobName") or batch_id)
+        job_dir = jobs_dir / job_name
+        worker_log_path = batch_root / "worker.log"
+        worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip() or None
+        harbor_root = resolve_harbor_repo(
+            explicit=str(executor_config.get("harborRepoPath") or "").strip() or None,
+            shared_root=shared_root,
+            configured=self._worker_mapping_value(executor_config, worker_id, "harborRepoPath"),
+            default=DEFAULT_HARBOR_REPO,
+        )
+        uv_binary = resolve_uv_binary(
+            explicit=str(executor_config.get("uvBinary") or "").strip() or None,
+            configured=self._worker_mapping_value(executor_config, worker_id, "uvBinary"),
+            shared_root=shared_root,
+        )
+        harbor_args = ["run", "harbor", "run", "-c", str(config_path), "-y"]
+        quoted_uv = shlex.quote(uv_binary)
+        quoted_args = " ".join(shlex.quote(arg) for arg in harbor_args)
+        command = [
+            "/bin/bash",
+            "-lc",
+            (
+                f"UV={quoted_uv}; "
+                f'if ! command -v "$UV" >/dev/null 2>&1 && [ ! -x "$UV" ]; then '
+                "curl -LsSf https://astral.sh/uv/install.sh | sh; "
+                'UV="$(command -v uv || true)"; '
+                "fi; "
+                'if [ -z "$UV" ]; then echo "uv not found after install" >&2; exit 127; fi; '
+                f'exec "$UV" {quoted_args}'
+            ),
+        ]
+        selected_case_ids = list(batch.get("selected_case_ids") or [])
+        metadata = {
+            "executorKind": self.kind,
+            "harborRepoPath": str(harbor_root),
+            "jobName": job_name,
+            "jobsDir": str(jobs_dir),
+            "datasetPath": "",
+            "selectedCaseIds": selected_case_ids,
+            "command": command,
+            "uvBinary": uv_binary,
+            "collectJobs": True,
+            "combinedJobsDir": str(executor_config.get("combinedJobsDir") or ""),
+            "harborConfigPath": str(config_path),
+        }
+        return PreparedBatch(
+            command=command,
+            env={"PYTHONUNBUFFERED": "1"},
+            cwd=harbor_root,
+            batch_root=batch_root,
+            local_root=local_root,
+            job_name=job_name,
+            jobs_dir=jobs_dir,
+            job_dir=job_dir,
+            dataset_path=config_path,
+            worker_log_path=worker_log_path,
+            metadata=metadata,
+        )
+
     def prepare(
         self,
         *,
@@ -78,6 +157,14 @@ class HarborExecutor(Executor):
         local_root: Path,
         shared_root: Path | None = None,
     ) -> PreparedBatch:
+        if "harborYamlByBatchId" in executor_config:
+            return self._prepare_from_harbor_yaml(
+                batch=batch,
+                executor_config=executor_config,
+                local_root=local_root,
+                shared_root=shared_root,
+            )
+
         batch_root = Path(str(batch["batch_root"])).resolve()
         batch_root.mkdir(parents=True, exist_ok=True)
         worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip() or None

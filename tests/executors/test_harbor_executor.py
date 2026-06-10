@@ -195,3 +195,62 @@ def test_prepare_claude_code_normalizes_retries_and_agent_kwargs(tmp_path: Path)
     assert "--ak version=2.1.152" in shell
     assert "--ak max_turns=80" not in shell
     assert "--ak thinking=disabled" not in shell
+
+
+def test_prepare_yaml_first_writes_config_and_uses_harbor_config_flag(tmp_path: Path) -> None:
+    batch_root = tmp_path / "batch-root"
+    batch_root.mkdir()
+    harbor_repo = tmp_path / "harbor"
+    harbor_repo.mkdir()
+    dataset = tmp_path / "tasks"
+    task = dataset / "alpha"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text("", encoding="utf-8")
+    yaml_text = f"""
+job_name: codex-openai-gpt-4o-tasks-20260610-120000
+jobs_dir: {batch_root / "harbor" / "jobs"}
+agents:
+  - name: codex
+    model_name: openai/gpt-4o
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+timeout_multiplier: 9.0
+"""
+
+    prepared = HarborExecutor().prepare(
+        batch={
+            "batch_id": "batch-test",
+            "batch_root": str(batch_root),
+            "selected_case_ids": ["alpha"],
+        },
+        run={},
+        template={},
+        dataset_ref=str(dataset),
+        executor_config={
+            "harborRepoPath": str(harbor_repo),
+            "uvBinary": "/usr/bin/uv",
+            "harborYamlGeneratedJobName": "codex-openai-gpt-4o-tasks-20260610-120000",
+            "harborYamlByBatchId": {"batch-test": yaml_text},
+            "agentName": "bitfun-cli",
+            "modelName": "deepseek-v4-pro",
+            "agentEnv": {"ANTHROPIC_API_KEY": "secret"},
+            "timeoutMultiplier": 1.0,
+        },
+        local_root=tmp_path / "local",
+        shared_root=None,
+    )
+
+    config_path = batch_root / "harbor-config.yaml"
+    shell = prepared.command[2]
+    assert config_path.exists()
+    assert "harbor run -c" in shell
+    assert str(config_path) in shell
+    assert "-a bitfun-cli" not in shell
+    assert "-m deepseek-v4-pro" not in shell
+    assert "--ae ANTHROPIC_API_KEY=secret" not in shell
+    assert "--timeout-multiplier 1.0" not in shell
+    assert prepared.job_name == "codex-openai-gpt-4o-tasks-20260610-120000"
+    assert prepared.jobs_dir == batch_root / "harbor" / "jobs"
+    assert prepared.metadata["selectedCaseIds"] == ["alpha"]
