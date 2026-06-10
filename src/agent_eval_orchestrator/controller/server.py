@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+from typing import Any
 from urllib import error, request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -32,6 +33,11 @@ from agent_eval_orchestrator.controller.asset_syncer import (
     validate_create_task_assets,
 )
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
+from agent_eval_orchestrator.controller.harbor_yaml import (
+    HarborYamlError,
+    build_batch_harbor_yaml,
+    parse_harbor_yaml,
+)
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
 from agent_eval_orchestrator.normalizers.harbor import normalize_harbor_job
 from agent_eval_orchestrator.normalizers.harbor_job_merge import (
@@ -761,6 +767,92 @@ class Handler(BaseHTTPRequestHandler):
             return
         _json_response(self, {"error": "not found"}, 404)
 
+    def _create_yaml_eval_task(self, body: dict[str, Any]) -> None:
+        try:
+            worker_ids = [
+                str(item).strip()
+                for item in body.get("workerIds") or []
+                if str(item).strip()
+            ]
+            if not worker_ids:
+                raise HarborYamlError("workerIds must not be empty")
+            workers = self.store.list_workers()
+            workers_by_id = {str(item["worker_id"]): item for item in workers}
+            missing_workers = [worker_id for worker_id in worker_ids if worker_id not in workers_by_id]
+            if missing_workers:
+                raise HarborYamlError("worker not found: " + ", ".join(missing_workers))
+
+            plan = parse_harbor_yaml(str(body.get("harborYaml") or ""))
+            template = self.store.create_task_template(
+                owner=DEFAULT_OWNER,
+                name=plan.generated_job_name,
+                dataset_ref=plan.dataset_ref,
+                executor_kind="harbor-docker",
+                executor_config={
+                    "harborYaml": plan.original_yaml,
+                    "harborYamlMode": plan.mode,
+                    "harborYamlTaskIds": plan.task_ids,
+                    "harborYamlGeneratedJobName": plan.generated_job_name,
+                    "harborYamlTimestamp": plan.timestamp,
+                    "collectJobs": True,
+                    "combinedJobsDir": "",
+                },
+                model_profile_ref=str(body.get("modelProfileRef") or "") or None,
+                note="",
+            )
+            run = self.store.create_run(
+                template_id=str(template["template_id"]),
+                display_name=plan.generated_job_name,
+            )
+            batches = self.store.create_sharded_batches(
+                run_id=str(run["run_id"]),
+                selected_case_ids=plan.task_ids,
+                worker_ids=worker_ids,
+                batch_options={"concurrency": int(plan.original_config.get("n_concurrent_trials") or 1)},
+                initial_status="queued",
+            )
+            yaml_by_batch_id = {}
+            combined_jobs_dir = ""
+            for batch in batches:
+                jobs_dir = Path(str(batch["batch_root"])) / "harbor" / "jobs"
+                if not combined_jobs_dir:
+                    combined_jobs_dir = str(jobs_dir)
+                yaml_by_batch_id[str(batch["batch_id"])] = build_batch_harbor_yaml(
+                    plan,
+                    batch_id=str(batch["batch_id"]),
+                    selected_task_ids=[str(item) for item in batch.get("selected_case_ids") or []],
+                    jobs_dir=str(jobs_dir),
+                )
+            template = self.store.update_task_template_executor_config(
+                str(template["template_id"]),
+                {
+                    "harborYamlByBatchId": yaml_by_batch_id,
+                    "combinedJobsDir": combined_jobs_dir,
+                },
+                replace_keys={"harborYamlByBatchId"},
+            )
+            run = self.store.get_run(str(run["run_id"])) or run
+        except HarborYamlError as exc:
+            _json_response(self, {"error": str(exc)}, 400)
+            return
+        except Exception as exc:
+            _json_response(self, {"error": str(exc)}, 400)
+            return
+
+        _json_response(
+            self,
+            {
+                "template": template,
+                "run": {
+                    **run,
+                    "syncStatus": run.get("sync_status") or None,
+                },
+                "batches": batches,
+                "syncJobId": None,
+            },
+            201,
+        )
+
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if not self._is_authorized():
@@ -788,6 +880,9 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, item, 201)
             return
         if path == "/api/eval-tasks/create-and-distribute":
+            if "harborYaml" in body:
+                self._create_yaml_eval_task(body)
+                return
             try:
                 owner = DEFAULT_OWNER
                 dataset_path = Path(str(body["datasetPath"])).expanduser()

@@ -140,6 +140,103 @@ def test_create_task_local_worker_returns_pending_sync(store, tmp_path):
     server.shutdown()
 
 
+def test_create_task_yaml_first_creates_queued_batches_without_sync(store, tmp_path):
+    dataset = tmp_path / "tasks"
+    for name in ("alpha", "beta", "gamma"):
+        case_dir = dataset / name
+        case_dir.mkdir(parents=True)
+        (case_dir / "task.toml").write_text("", encoding="utf-8")
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
+    )
+    store.register_worker(
+        worker_id="local-b",
+        display_name="local-b",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-b"), "localToController": True},
+    )
+    server = start_test_server(store, tmp_path, 9884)
+    conn = HTTPConnection("127.0.0.1", 9884)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+job_name: user-job
+jobs_dir: user-jobs
+n_concurrent_trials: 4
+agents:
+  - name: codex
+    model_name: openai/gpt-4o
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+      - beta
+      - gamma
+""",
+            "workerIds": ["local-a", "local-b"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 201
+    assert payload["syncJobId"] is None
+    assert payload["run"]["syncStatus"] is None
+    assert payload["run"]["display_name"].startswith("codex-openai-gpt-4o-tasks-")
+    assert {batch["status"] for batch in payload["batches"]} == {"queued"}
+    assert len(payload["batches"]) == 2
+    config = payload["template"]["executor_config"]
+    assert config["harborYamlMode"] == "datasets"
+    assert sorted(config["harborYamlByBatchId"]) == sorted(batch["batch_id"] for batch in payload["batches"])
+    assert "bitfunCliPath" not in config
+
+
+def test_create_task_yaml_first_rejects_invalid_worker(store, tmp_path):
+    dataset = tmp_path / "tasks"
+    case_dir = dataset / "alpha"
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    server = start_test_server(store, tmp_path, 9885)
+    conn = HTTPConnection("127.0.0.1", 9885)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+""",
+            "workerIds": ["missing-worker"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 400
+    assert "worker not found" in payload["error"]
+
+
 def test_get_run_sync_status(store, tmp_path):
     assets = _prepare_assets(tmp_path)
     store.register_worker(
