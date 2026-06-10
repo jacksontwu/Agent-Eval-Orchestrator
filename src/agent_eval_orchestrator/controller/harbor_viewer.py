@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import socket
 import subprocess
 import time
 from urllib import request
@@ -29,9 +30,18 @@ class HarborViewerManager:
     def _pick_port(self) -> int:
         used = {session.port for session in self.sessions.values() if session.process.poll() is None}
         for port in range(self.port_start, self.port_end + 1):
-            if port not in used:
+            if port not in used and self._port_available(port):
                 return port
         raise RuntimeError("no available harbor viewer port")
+
+    def _port_available(self, port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+        return True
 
     def _wait_ready(self, port: int, timeout_sec: int = 15) -> None:
         deadline = time.time() + timeout_sec
