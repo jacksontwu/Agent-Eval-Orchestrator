@@ -45,6 +45,7 @@ from agent_eval_orchestrator.normalizers.harbor import normalize_harbor_job
 from agent_eval_orchestrator.normalizers.harbor_job_merge import (
     copy_trial_dirs,
     refresh_job_result,
+    resolve_controller_harbor_repo,
     write_merged_job,
 )
 from agent_eval_orchestrator.normalizers.harbor_timestamps import normalize_jobs_dir
@@ -67,6 +68,13 @@ def resolve_global_harbor_viewer_paths(jobs_dir: str | None = None) -> tuple[Pat
     raw = str(jobs_dir or DEFAULT_JOBS_DIR).strip() or str(DEFAULT_JOBS_DIR)
     jobs_path = Path(raw).expanduser().resolve()
     return jobs_path.parent, jobs_path
+
+
+def resolve_controller_viewer_harbor_repo() -> Path:
+    raw = os.environ.get("AEO_HARBOR_REPO", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return resolve_controller_harbor_repo()
 
 
 def _is_subpath(path: Path, root: Path) -> bool:
@@ -1651,7 +1659,7 @@ def main(argv: list[str] | None = None) -> int:
     Handler.controller_shared_root = layout.root
     Handler.ssh_config_path = ssh_config_path
     Handler.viewer_manager = HarborViewerManager(
-        harbor_repo=Path("/root/projects/harbor").resolve(),
+        harbor_repo=resolve_controller_viewer_harbor_repo(),
         logs_dir=layout.controller_dir / "viewer-logs",
     )
     print(f"[controller] listening on http://{args.host}:{args.port}", flush=True)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from agent_eval_orchestrator.controller import server
 from agent_eval_orchestrator.controller.server import Handler
+from agent_eval_orchestrator.controller.server import resolve_controller_viewer_harbor_repo
 from agent_eval_orchestrator.controller.server import resolve_global_harbor_viewer_paths
 
 
@@ -16,6 +17,21 @@ def test_resolve_global_harbor_viewer_paths_uses_default_when_missing() -> None:
     harbor_repo, jobs_path = resolve_global_harbor_viewer_paths(None)
     assert jobs_path.name == "jobs"
     assert harbor_repo == jobs_path.parent
+
+
+def test_resolve_controller_viewer_harbor_repo_prefers_aeo_env(tmp_path, monkeypatch) -> None:
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setenv("AEO_HARBOR_REPO", str(harbor_repo))
+
+    assert resolve_controller_viewer_harbor_repo() == harbor_repo.resolve()
+
+
+def test_resolve_controller_viewer_harbor_repo_falls_back_to_harbor_probe(tmp_path, monkeypatch) -> None:
+    harbor_repo = tmp_path / "detected-harbor"
+    monkeypatch.delenv("AEO_HARBOR_REPO", raising=False)
+    monkeypatch.setattr(server, "resolve_controller_harbor_repo", lambda: harbor_repo)
+
+    assert resolve_controller_viewer_harbor_repo() == harbor_repo
 
 
 def test_global_harbor_viewer_uses_proxy_session_for_requested_jobs_dir(tmp_path, monkeypatch) -> None:
