@@ -5,6 +5,8 @@ from http.client import HTTPConnection
 from pathlib import Path
 from threading import Thread
 
+import yaml
+
 from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
 from agent_eval_orchestrator.controller.server import Handler, ThreadedServer
 from agent_eval_orchestrator.storage.store import Store
@@ -140,7 +142,7 @@ def test_create_task_local_worker_returns_pending_sync(store, tmp_path):
     server.shutdown()
 
 
-def test_create_task_yaml_first_creates_queued_batches_without_sync(store, tmp_path):
+def test_create_task_yaml_first_syncs_dataset_and_rewrites_batch_yaml(store, tmp_path):
     dataset = tmp_path / "tasks"
     for name in ("alpha", "beta", "gamma"):
         case_dir = dataset / name
@@ -194,15 +196,22 @@ datasets:
     server.shutdown()
 
     assert resp.status == 201
-    assert payload["syncJobId"] is None
-    assert payload["run"]["syncStatus"] is None
+    assert payload["syncJobId"]
+    assert payload["run"]["syncStatus"] == "pending"
     assert payload["run"]["display_name"].startswith("codex-openai-gpt-4o-tasks-")
-    assert {batch["status"] for batch in payload["batches"]} == {"queued"}
+    assert {batch["status"] for batch in payload["batches"]} == {"pending_sync"}
     assert len(payload["batches"]) == 2
     config = payload["template"]["executor_config"]
     assert config["harborYamlMode"] == "datasets"
     assert sorted(config["harborYamlByBatchId"]) == sorted(batch["batch_id"] for batch in payload["batches"])
     assert "bitfunCliPath" not in config
+    workers_by_id = {"local-a": tmp_path / "runtime-a", "local-b": tmp_path / "runtime-b"}
+    for batch in payload["batches"]:
+        worker_id = batch["preferred_worker_id"]
+        batch_yaml = yaml.safe_load(config["harborYamlByBatchId"][batch["batch_id"]])
+        assert batch_yaml["datasets"][0]["path"] == str(
+            workers_by_id[worker_id] / "sync" / payload["run"]["run_id"] / "dataset"
+        )
 
 
 def test_create_task_yaml_first_rejects_invalid_worker(store, tmp_path):

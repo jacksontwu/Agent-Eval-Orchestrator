@@ -113,6 +113,38 @@ tasks:
     assert payload["tasks"] == [{"path": str(dataset / "beta"), "metadata": {"split": "two"}}]
 
 
+def test_build_tasks_mode_yaml_can_rewrite_paths_to_worker_dataset(tmp_path: Path) -> None:
+    dataset = tmp_path / "tasks"
+    _task(dataset, "alpha")
+    _task(dataset, "beta")
+    raw = f"""
+agents:
+  - name: codex
+    model_name: openai/gpt-4o
+tasks:
+  - path: {dataset / "alpha"}
+    metadata:
+      split: one
+  - path: {dataset / "beta"}
+    metadata:
+      split: two
+"""
+
+    plan = parse_harbor_yaml(raw, timestamp="20260610-120000")
+    batch_yaml = build_batch_harbor_yaml(
+        plan,
+        batch_id="batch-a",
+        selected_task_ids=["beta"],
+        jobs_dir="/tmp/batch/harbor/jobs",
+        worker_dataset_path="/worker/sync/run-1/dataset",
+    )
+    payload = yaml.safe_load(batch_yaml)
+
+    assert payload["tasks"] == [
+        {"path": "/worker/sync/run-1/dataset/beta", "metadata": {"split": "two"}}
+    ]
+
+
 def test_rejects_both_datasets_and_tasks(tmp_path: Path) -> None:
     dataset = tmp_path / "tasks"
     _task(dataset, "alpha")

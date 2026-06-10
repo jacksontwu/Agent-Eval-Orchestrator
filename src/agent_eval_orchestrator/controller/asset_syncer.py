@@ -48,14 +48,14 @@ def is_local_worker(worker: dict[str, Any], controller_shared_root: Path) -> boo
     return False
 
 
-def initial_worker_steps(worker_ids: list[str]) -> list[dict[str, Any]]:
+def initial_worker_steps(worker_ids: list[str], *, include_bitfun: bool = True) -> list[dict[str, Any]]:
+    step_defs = [{"id": "sync_cases", "label": SYNC_STEP_LABELS["sync_cases"], "status": "pending"}]
+    if include_bitfun:
+        step_defs.append({"id": "sync_bitfun", "label": SYNC_STEP_LABELS["sync_bitfun"], "status": "pending"})
     return [
         {
             "workerId": worker_id,
-            "steps": [
-                {"id": "sync_cases", "label": SYNC_STEP_LABELS["sync_cases"], "status": "pending"},
-                {"id": "sync_bitfun", "label": SYNC_STEP_LABELS["sync_bitfun"], "status": "pending"},
-            ],
+            "steps": [dict(step) for step in step_defs],
         }
         for worker_id in worker_ids
     ]
@@ -123,6 +123,40 @@ def validate_create_task_assets(
             raise RuntimeError(f"worker {worker_id} requires ssh_host_alias for remote asset sync")
 
 
+def validate_dataset_assets(
+    *,
+    dataset_path: Path,
+    case_ids: list[str],
+    workers: list[dict[str, Any]],
+    worker_ids: list[str],
+    controller_shared_root: Path,
+    task_sources: dict[str, str] | None = None,
+) -> None:
+    if task_sources:
+        for case_id in case_ids:
+            source = Path(str(task_sources.get(case_id) or "")).expanduser()
+            if not source.is_dir():
+                raise RuntimeError(f"task path not found: {case_id}")
+    else:
+        if not dataset_path.exists() or not dataset_path.is_dir():
+            raise RuntimeError(f"datasetPath not found: {dataset_path}")
+        for case_id in case_ids:
+            case_dir = dataset_path / case_id
+            if not case_dir.is_dir():
+                raise RuntimeError(f"case directory not found: {case_id}")
+    if not worker_ids:
+        raise RuntimeError("workerIds must not be empty")
+    workers_by_id = {str(item["worker_id"]): item for item in workers}
+    for worker_id in worker_ids:
+        worker = workers_by_id.get(worker_id)
+        if not worker:
+            raise RuntimeError(f"worker not found: {worker_id}")
+        if is_local_worker(worker, controller_shared_root):
+            continue
+        if not str(worker.get("ssh_host_alias") or "").strip():
+            raise RuntimeError(f"worker {worker_id} requires ssh_host_alias for remote asset sync")
+
+
 def _worker_target_root(worker: dict[str, Any], run_id: str) -> str:
     shared_root = str((worker.get("capabilities") or {}).get("sharedRoot") or "").strip()
     if not shared_root:
@@ -134,11 +168,12 @@ def build_sync_manifest(
     *,
     run_id: str,
     dataset_path: Path,
-    bitfun_cli_path: Path,
-    bitfun_config_dir: Path,
     worker_shards: dict[str, list[str]],
     workers_by_id: dict[str, dict[str, Any]],
     controller_shared_root: Path,
+    bitfun_cli_path: Path | None = None,
+    bitfun_config_dir: Path | None = None,
+    task_sources: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     workers: dict[str, Any] = {}
     for worker_id, case_ids in worker_shards.items():
@@ -152,12 +187,17 @@ def build_sync_manifest(
         if not local:
             entry["sshHostAlias"] = str(worker["ssh_host_alias"])
         workers[worker_id] = entry
-    return {
+    manifest: dict[str, Any] = {
         "datasetPath": str(dataset_path),
-        "bitfunCliPath": str(bitfun_cli_path),
-        "bitfunConfigDir": str(bitfun_config_dir),
         "workers": workers,
     }
+    if bitfun_cli_path is not None:
+        manifest["bitfunCliPath"] = str(bitfun_cli_path)
+    if bitfun_config_dir is not None:
+        manifest["bitfunConfigDir"] = str(bitfun_config_dir)
+    if task_sources:
+        manifest["taskSources"] = dict(task_sources)
+    return manifest
 
 
 def worker_executor_paths(*, target_root: str, uv_binary: str) -> dict[str, Any]:
@@ -172,6 +212,16 @@ def sync_cases_local(*, dataset_path: Path, case_ids: list[str], target_dataset_
     target_dataset_dir.mkdir(parents=True, exist_ok=True)
     for case_id in case_ids:
         src = dataset_path / case_id
+        dst = target_dataset_dir / case_id
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+
+
+def sync_task_sources_local(*, task_sources: dict[str, str], case_ids: list[str], target_dataset_dir: Path) -> None:
+    target_dataset_dir.mkdir(parents=True, exist_ok=True)
+    for case_id in case_ids:
+        src = Path(str(task_sources[case_id])).expanduser()
         dst = target_dataset_dir / case_id
         if dst.exists():
             shutil.rmtree(dst)
@@ -206,6 +256,23 @@ def sync_cases_remote(
     for case_id in case_ids:
         ssh.rsync_dir(
             dataset_path / case_id,
+            f"{host_alias}:{target_root}/dataset/{case_id}/",
+            remote=True,
+        )
+
+
+def sync_task_sources_remote(
+    *,
+    ssh: SshRunner,
+    host_alias: str,
+    task_sources: dict[str, str],
+    case_ids: list[str],
+    target_root: str,
+) -> None:
+    ssh.remote_mkdir_p(host_alias, f"{target_root}/dataset")
+    for case_id in case_ids:
+        ssh.rsync_dir(
+            Path(str(task_sources[case_id])).expanduser(),
             f"{host_alias}:{target_root}/dataset/{case_id}/",
             remote=True,
         )
@@ -265,7 +332,10 @@ class AssetSyncer:
         manifest = dict(run.get("sync_manifest") or {})
         worker_entries = manifest.get("workers") or {}
         worker_ids = list(worker_entries.keys())
-        steps = initial_worker_steps(worker_ids)
+        include_bitfun = bool(str(manifest.get("bitfunCliPath") or "").strip()) and bool(
+            str(manifest.get("bitfunConfigDir") or "").strip()
+        )
+        steps = initial_worker_steps(worker_ids, include_bitfun=include_bitfun)
         self.store.update_asset_sync_job(job_id, status="running", steps=steps)
         self.store.update_run_sync_fields(run_id=run_id, sync_status="running")
 
@@ -285,12 +355,14 @@ class AssetSyncer:
                 self._sync_cases(entry, manifest)
                 with lock:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "succeeded")
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "running")
-                    self.store.update_asset_sync_job(job_id, current_step=f"{worker_id}:sync_bitfun", steps=steps)
-                self._sync_bitfun(entry, manifest)
-                with lock:
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
-                    self.store.update_asset_sync_job(job_id, steps=steps)
+                    if include_bitfun:
+                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "running")
+                        self.store.update_asset_sync_job(job_id, current_step=f"{worker_id}:sync_bitfun", steps=steps)
+                if include_bitfun:
+                    self._sync_bitfun(entry, manifest)
+                    with lock:
+                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
+                        self.store.update_asset_sync_job(job_id, steps=steps)
                 paths = worker_executor_paths(
                     target_root=str(entry["targetRoot"]),
                     uv_binary=uv_binary,
@@ -306,7 +378,8 @@ class AssetSyncer:
             except Exception as exc:
                 with lock:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "failed")
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
+                    if include_bitfun:
+                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
                     self.store.update_asset_sync_job(job_id, steps=steps)
                 self.store.mark_worker_batches_sync_failed(run_id=run_id, worker_id=worker_id)
                 errors.append(f"{worker_id}: {exc}")
@@ -386,7 +459,10 @@ class AssetSyncer:
         executor_config = dict((template or {}).get("executor_config") or {})
         worker_shards = dict(rerun_job["worker_shards"])
         worker_ids = list(worker_shards.keys())
-        steps = initial_worker_steps(worker_ids)
+        include_bitfun = bool(str(manifest.get("bitfunCliPath") or "").strip()) and bool(
+            str(manifest.get("bitfunConfigDir") or "").strip()
+        )
+        steps = initial_worker_steps(worker_ids, include_bitfun=include_bitfun)
         sync_job_id = new_id("sync")
         self.store.update_run_rerun_job(job_id, status="running", sync_job_id=sync_job_id)
         self.store.create_asset_sync_job(job_id=sync_job_id, run_id=run_id, steps=steps)
@@ -402,7 +478,8 @@ class AssetSyncer:
             if missing_workers:
                 for worker_id in worker_ids:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "failed")
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
+                    if include_bitfun:
+                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
                 self._finish_rerun_sync_failure(
                     run_id=run_id,
                     job_id=job_id,
@@ -416,7 +493,8 @@ class AssetSyncer:
                 return
             for worker_id in worker_ids:
                 steps = set_worker_step_status(steps, worker_id, "sync_cases", "succeeded")
-                steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
+                if include_bitfun:
+                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
                 self.store.promote_worker_batches_to_queued(run_id=run_id, worker_id=worker_id)
             self._finish_rerun_sync_success(
                 run_id=run_id,
@@ -441,12 +519,14 @@ class AssetSyncer:
                 self._sync_cases(entry, manifest)
                 with lock:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "succeeded")
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "running")
-                    self.store.update_asset_sync_job(sync_job_id, steps=steps)
-                self._sync_bitfun(entry, manifest)
-                with lock:
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
-                    self.store.update_asset_sync_job(sync_job_id, steps=steps)
+                    if include_bitfun:
+                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "running")
+                        self.store.update_asset_sync_job(sync_job_id, steps=steps)
+                if include_bitfun:
+                    self._sync_bitfun(entry, manifest)
+                    with lock:
+                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
+                        self.store.update_asset_sync_job(sync_job_id, steps=steps)
                 uv_binary = str((executor_config.get("uvBinaryByWorker") or {}).get(worker_id) or "")
                 paths = worker_executor_paths(
                     target_root=str(entry["targetRoot"]),
@@ -463,7 +543,8 @@ class AssetSyncer:
             except Exception as exc:
                 with lock:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "failed")
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
+                    if include_bitfun:
+                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
                     self.store.update_asset_sync_job(sync_job_id, steps=steps)
                 self.store.mark_worker_batches_sync_failed(run_id=run_id, worker_id=worker_id)
                 errors.append(f"{worker_id}: {exc}")
@@ -495,11 +576,28 @@ class AssetSyncer:
         dataset_path = Path(str(manifest["datasetPath"]))
         case_ids = list(entry["caseIds"])
         target_root = str(entry["targetRoot"])
+        task_sources = manifest.get("taskSources")
         if entry["transport"] == "local":
+            if isinstance(task_sources, dict) and task_sources:
+                sync_task_sources_local(
+                    task_sources={str(k): str(v) for k, v in task_sources.items()},
+                    case_ids=case_ids,
+                    target_dataset_dir=Path(target_root) / "dataset",
+                )
+                return
             sync_cases_local(
                 dataset_path=dataset_path,
                 case_ids=case_ids,
                 target_dataset_dir=Path(target_root) / "dataset",
+            )
+            return
+        if isinstance(task_sources, dict) and task_sources:
+            sync_task_sources_remote(
+                ssh=self.ssh,
+                host_alias=str(entry["sshHostAlias"]),
+                task_sources={str(k): str(v) for k, v in task_sources.items()},
+                case_ids=case_ids,
+                target_root=target_root,
             )
             return
         sync_cases_remote(
@@ -511,6 +609,10 @@ class AssetSyncer:
         )
 
     def _sync_bitfun(self, entry: dict[str, Any], manifest: dict[str, Any]) -> None:
+        if not str(manifest.get("bitfunCliPath") or "").strip() or not str(
+            manifest.get("bitfunConfigDir") or ""
+        ).strip():
+            return
         target_root = str(entry["targetRoot"])
         if entry["transport"] == "local":
             sync_bitfun_local(

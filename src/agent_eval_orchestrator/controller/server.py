@@ -30,6 +30,7 @@ from agent_eval_orchestrator.controller.asset_syncer import (
     AssetSyncer,
     build_sync_manifest,
     initial_worker_steps,
+    validate_dataset_assets,
     validate_create_task_assets,
 )
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
@@ -783,6 +784,20 @@ class Handler(BaseHTTPRequestHandler):
                 raise HarborYamlError("worker not found: " + ", ".join(missing_workers))
 
             plan = parse_harbor_yaml(str(body.get("harborYaml") or ""))
+            controller_root = (self.controller_shared_root or self.store.layout.root).expanduser()
+            task_sources = (
+                {task_id: str(task["path"]) for task_id, task in plan.tasks_by_id.items()}
+                if plan.mode == "tasks"
+                else None
+            )
+            validate_dataset_assets(
+                dataset_path=Path(plan.dataset_ref),
+                case_ids=plan.task_ids,
+                workers=workers,
+                worker_ids=worker_ids,
+                controller_shared_root=controller_root,
+                task_sources=task_sources,
+            )
             template = self.store.create_task_template(
                 owner=DEFAULT_OWNER,
                 name=plan.generated_job_name,
@@ -809,7 +824,19 @@ class Handler(BaseHTTPRequestHandler):
                 selected_case_ids=plan.task_ids,
                 worker_ids=worker_ids,
                 batch_options={"concurrency": int(plan.original_config.get("n_concurrent_trials") or 1)},
-                initial_status="queued",
+                initial_status="pending_sync",
+            )
+            worker_shards = {
+                str(batch["preferred_worker_id"]): list(batch["selected_case_ids"])
+                for batch in batches
+            }
+            manifest = build_sync_manifest(
+                run_id=str(run["run_id"]),
+                dataset_path=Path(plan.dataset_ref),
+                worker_shards=worker_shards,
+                workers_by_id=workers_by_id,
+                controller_shared_root=controller_root,
+                task_sources=task_sources,
             )
             yaml_by_batch_id = {}
             combined_jobs_dir = ""
@@ -817,11 +844,14 @@ class Handler(BaseHTTPRequestHandler):
                 jobs_dir = Path(str(batch["batch_root"])) / "harbor" / "jobs"
                 if not combined_jobs_dir:
                     combined_jobs_dir = str(jobs_dir)
+                worker_id = str(batch["preferred_worker_id"])
+                worker_dataset_path = str(Path(str(manifest["workers"][worker_id]["targetRoot"])) / "dataset")
                 yaml_by_batch_id[str(batch["batch_id"])] = build_batch_harbor_yaml(
                     plan,
                     batch_id=str(batch["batch_id"]),
                     selected_task_ids=[str(item) for item in batch.get("selected_case_ids") or []],
                     jobs_dir=str(jobs_dir),
+                    worker_dataset_path=worker_dataset_path,
                 )
             template = self.store.update_task_template_executor_config(
                 str(template["template_id"]),
@@ -831,6 +861,24 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 replace_keys={"harborYamlByBatchId"},
             )
+            sync_job_id = new_id("sync")
+            self.store.update_run_sync_fields(
+                run_id=str(run["run_id"]),
+                sync_status="pending",
+                sync_job_id=sync_job_id,
+                sync_manifest=manifest,
+            )
+            self.store.create_asset_sync_job(
+                job_id=sync_job_id,
+                run_id=str(run["run_id"]),
+                steps=initial_worker_steps(worker_ids, include_bitfun=False),
+            )
+            if self.asset_syncer is not None:
+                self.asset_syncer.start_job_async(
+                    job_id=sync_job_id,
+                    run_id=str(run["run_id"]),
+                    template_id=str(template["template_id"]),
+                )
             run = self.store.get_run(str(run["run_id"])) or run
         except HarborYamlError as exc:
             _json_response(self, {"error": str(exc)}, 400)
@@ -845,10 +893,10 @@ class Handler(BaseHTTPRequestHandler):
                 "template": template,
                 "run": {
                     **run,
-                    "syncStatus": run.get("sync_status") or None,
+                    "syncStatus": run.get("sync_status") or "pending",
                 },
                 "batches": batches,
-                "syncJobId": None,
+                "syncJobId": run.get("sync_job_id") or sync_job_id,
             },
             201,
         )

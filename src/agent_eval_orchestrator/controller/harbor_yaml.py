@@ -69,6 +69,7 @@ def build_batch_harbor_yaml(
     batch_id: str,
     selected_task_ids: list[str],
     jobs_dir: str,
+    worker_dataset_path: str | None = None,
 ) -> str:
     if not selected_task_ids:
         raise HarborYamlError(f"batch {batch_id} has no selected task ids")
@@ -81,11 +82,19 @@ def build_batch_harbor_yaml(
     payload["jobs_dir"] = str(jobs_dir)
     if plan.mode == "datasets":
         dataset_entry = dict(payload["datasets"][0])
+        if worker_dataset_path:
+            dataset_entry["path"] = str(worker_dataset_path)
         dataset_entry["task_names"] = list(selected_task_ids)
         dataset_entry.pop("n_tasks", None)
         payload["datasets"] = [dataset_entry]
     else:
-        payload["tasks"] = [deepcopy(plan.tasks_by_id[task_id]) for task_id in selected_task_ids]
+        tasks = []
+        for task_id in selected_task_ids:
+            task = deepcopy(plan.tasks_by_id[task_id])
+            if worker_dataset_path:
+                task["path"] = str(Path(worker_dataset_path) / task_id)
+            tasks.append(task)
+        payload["tasks"] = tasks
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
 
