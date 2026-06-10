@@ -3,6 +3,8 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+import yaml
+
 from agent_eval_orchestrator.executors.harbor import HarborExecutor
 
 
@@ -200,6 +202,7 @@ def test_prepare_claude_code_normalizes_retries_and_agent_kwargs(tmp_path: Path)
 def test_prepare_yaml_first_writes_config_and_uses_harbor_config_flag(tmp_path: Path) -> None:
     batch_root = tmp_path / "batch-root"
     batch_root.mkdir()
+    controller_batch_root = tmp_path / "controller-batch-root"
     harbor_repo = tmp_path / "harbor"
     harbor_repo.mkdir()
     dataset = tmp_path / "tasks"
@@ -208,7 +211,7 @@ def test_prepare_yaml_first_writes_config_and_uses_harbor_config_flag(tmp_path: 
     (task / "task.toml").write_text("", encoding="utf-8")
     yaml_text = f"""
 job_name: codex-openai-gpt-4o-tasks-20260610-120000
-jobs_dir: {batch_root / "harbor" / "jobs"}
+jobs_dir: {controller_batch_root / "harbor" / "jobs"}
 agents:
   - name: codex
     model_name: openai/gpt-4o
@@ -245,6 +248,9 @@ timeout_multiplier: 9.0
     config_path = batch_root / "harbor-config.yaml"
     shell = prepared.command[2]
     assert config_path.exists()
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["jobs_dir"] == str(batch_root / "harbor" / "jobs")
+    assert config["job_name"] == "codex-openai-gpt-4o-tasks-20260610-120000"
     assert "harbor run -c" in shell
     assert str(config_path) in shell
     assert "-a bitfun-cli" not in shell

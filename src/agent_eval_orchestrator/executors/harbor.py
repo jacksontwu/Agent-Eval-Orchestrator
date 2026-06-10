@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from agent_eval_orchestrator.core.defaults import (
     CLAUDE_CODE_AGENT_NAME,
     CLAUDE_CODE_OMITTED_AGENT_KWARGS,
@@ -81,13 +83,16 @@ class HarborExecutor(Executor):
         yaml_by_batch = executor_config.get("harborYamlByBatchId")
         if not isinstance(yaml_by_batch, dict) or batch_id not in yaml_by_batch:
             raise RuntimeError(f"missing harborYamlByBatchId for batch: {batch_id}")
-        harbor_yaml = str(yaml_by_batch[batch_id])
-        config_path = batch_root / "harbor-config.yaml"
-        config_path.write_text(harbor_yaml, encoding="utf-8")
-
         jobs_dir = batch_root / "harbor" / "jobs"
         jobs_dir.mkdir(parents=True, exist_ok=True)
         job_name = str(executor_config.get("harborYamlGeneratedJobName") or batch_id)
+        harbor_config = yaml.safe_load(str(yaml_by_batch[batch_id]))
+        if not isinstance(harbor_config, dict):
+            raise RuntimeError(f"harbor YAML for batch {batch_id} must be a mapping")
+        harbor_config["job_name"] = job_name
+        harbor_config["jobs_dir"] = str(jobs_dir)
+        config_path = batch_root / "harbor-config.yaml"
+        config_path.write_text(yaml.safe_dump(harbor_config, sort_keys=False, allow_unicode=True), encoding="utf-8")
         job_dir = jobs_dir / job_name
         worker_log_path = batch_root / "worker.log"
         worker_id = str(batch.get("assigned_worker_id") or batch.get("preferred_worker_id") or "").strip() or None
