@@ -63,27 +63,23 @@ def test_rerun_disabled_reason_is_visible_and_prefers_no_exception() -> None:
     assert '<span class="subtle">' in INDEX_HTML
 
 
-def test_create_form_agent_name_input_is_editable() -> None:
-    agent_input = create_form_inputs()["agentName"]
-
-    assert "readonly" not in agent_input
-    assert "disabled" not in agent_input
-
-
-def test_create_form_exposes_model_agent_env_and_agent_kwargs() -> None:
+def test_create_form_uses_harbor_yaml_textarea() -> None:
     inputs = create_form_inputs()
     textareas = create_form_textareas()
 
-    assert inputs["modelName"]["value"] == "deepseek-v4-pro"
-    assert "agentEnv" in textareas
-    assert "agentKwargs" in textareas
+    assert "harborYaml" in textareas
+    assert "name" not in inputs
+    assert "agentName" not in inputs
+    assert "modelName" not in inputs
+    assert "bitfunCliPath" not in inputs
+    assert "bitfunConfigDir" not in inputs
+    assert "timeoutMultiplier" not in inputs
+    assert "selectedCaseIds" not in textareas
+    assert "agentEnv" not in textareas
+    assert "agentKwargs" not in textareas
 
 
-def test_create_payload_parses_agent_env_and_kwargs_into_executor_config() -> None:
-    assert "function parseKeyValueLines" in INDEX_HTML
-    assert 'const modelName = String(data.get("modelName") || "").trim()' in INDEX_HTML
-    assert 'const agentEnv = parseKeyValueLines(data.get("agentEnv"))' in INDEX_HTML
-    assert 'const agentKwargs = parseKeyValueLines(data.get("agentKwargs"))' in INDEX_HTML
-    assert "if (modelName) executorConfig.modelName = modelName" in INDEX_HTML
-    assert "if (Object.keys(agentEnv).length) executorConfig.agentEnv = agentEnv" in INDEX_HTML
-    assert "if (Object.keys(agentKwargs).length) executorConfig.agentKwargs = agentKwargs" in INDEX_HTML
+def test_create_payload_sends_harbor_yaml_and_worker_ids_only() -> None:
+    assert 'harborYaml: String(data.get("harborYaml") || "").trim()' in INDEX_HTML
+    assert "任务已创建，正在分发到 worker" in INDEX_HTML
+    assert "任务已创建，正在同步资产到 worker" not in INDEX_HTML

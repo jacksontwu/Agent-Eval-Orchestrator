@@ -533,91 +533,20 @@ INDEX_HTML = """<!doctype html>
         <div class="panel-header">
           <div>
             <h2>Create Distributed Eval Task</h2>
-            <div class="subtle">创建一次 bitfun-cli Harbor 评测任务，controller 会自动切分 case 并合并 jobs</div>
+            <div class="subtle">粘贴 Harbor YAML，controller 自动切分任务并透传配置到 worker</div>
           </div>
         </div>
         <div class="detail">
           <form id="createTaskForm">
-            <div class="detail-grid" style="margin-bottom:16px">
-              <div class="field">
-                <label>Task Name</label>
-                <input name="name" placeholder="terminal-bench-2-bitfun" required />
-              </div>
-              <div class="field">
-                <label>Executor</label>
-                <input name="executorKind" value="harbor-docker" readonly />
-              </div>
-              <div class="field">
-                <label>Agent Name</label>
-                <input name="agentName" value="bitfun-cli" required />
-              </div>
-              <div class="field">
-                <label>Model</label>
-                <input name="modelName" value="deepseek-v4-pro" placeholder="deepseek-v4-pro" />
-              </div>
-              <div class="field">
-                <label>Per Worker Concurrency</label>
-                <input name="nConcurrent" type="number" min="1" value="1" required />
-              </div>
-            </div>
-
-            <div class="detail-grid" style="margin-bottom:16px">
-              <div class="field">
-                <label>Timeout Multiplier</label>
-                <input name="timeoutMultiplier" type="number" min="0.1" step="0.1" value="1.0" />
-              </div>
-              <div class="field">
-                <label>Agent Timeout Multiplier</label>
-                <input name="agentTimeoutMultiplier" type="number" min="0.1" step="0.1" value="3.0" />
-              </div>
-              <div class="field">
-                <label>Verifier Timeout Multiplier</label>
-                <input name="verifierTimeoutMultiplier" type="number" min="0.1" step="0.1" value="2.0" />
-              </div>
-              <div class="field">
-                <label>Environment Build Multiplier</label>
-                <input name="environmentBuildTimeoutMultiplier" type="number" min="0.1" step="0.1" value="1.5" />
-              </div>
-            </div>
-
-            <div class="detail-grid" style="margin-bottom:16px">
-              <div class="field">
-                <label>Dataset Path</label>
-                <input name="datasetPath" id="datasetPathInput" placeholder="/root/projects/agent-eval-orchestrator/datasets/swe-bench-verified" required />
-              </div>
-              <div class="field">
-                <label>BitFun CLI Path</label>
-                <input name="bitfunCliPath" value="/root/projects/BitFun/target/release/bitfun-cli" required />
-              </div>
-              <div class="field">
-                <label>BitFun Config Root</label>
-                <input name="bitfunConfigDir" value="/root/.config/bitfun" required />
-              </div>
-              <div class="field">
-                <label>Jobs Dir</label>
-                <input name="jobsDir" value="/root/projects/harbor/jobs" required />
-              </div>
-            </div>
-
             <div class="field" style="margin-bottom:16px">
-              <label>Selected Case IDs（每行一个，可空）</label>
-              <textarea name="selectedCaseIds" placeholder="留空则执行全量 dataset，并按 worker 容量自动分配&#10;astropy__astropy-12907&#10;astropy__astropy-13033"></textarea>
-            </div>
-
-            <div class="detail-grid" style="margin-bottom:16px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
-              <div class="field">
-                <label>Agent Env (--ae，每行一个 KEY=value)</label>
-                <textarea name="agentEnv" placeholder="ANTHROPIC_API_KEY=&lt;your-api-key&gt;&#10;ANTHROPIC_BASE_URL=&lt;your-base-url&gt;&#10;ANTHROPIC_MODEL=deepseek-v4-pro&#10;ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro&#10;ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro&#10;ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro&#10;CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro"></textarea>
-              </div>
-              <div class="field">
-                <label>Agent Kwargs (--ak，每行一个 KEY=value)</label>
-                <textarea name="agentKwargs" placeholder="thinking=enabled&#10;reasoning_effort=max"></textarea>
-              </div>
+              <label>Harbor YAML</label>
+              <textarea name="harborYaml" required style="min-height:360px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"></textarea>
+              <div class="subtle" style="margin-top:8px">粘贴 harbor run -c 使用的 YAML；AEO 只解析任务范围、分发 worker，并生成 job name，其它参数原样透传。</div>
             </div>
 
             <div style="margin-bottom:16px">
               <h3 style="margin-bottom:10px">Workers</h3>
-              <div class="subtle" style="margin-bottom:10px">勾选参与执行的 worker；创建后 controller 会将 dataset shard 与 bitfun-cli 同步到各 worker</div>
+              <div class="subtle" style="margin-bottom:10px">勾选参与执行的 worker；创建后 controller 会按 worker 容量拆分 YAML 任务集合。</div>
               <div id="createWorkerConfigs"></div>
             </div>
 
@@ -1052,7 +981,6 @@ INDEX_HTML = """<!doctype html>
       renderWorkerRuntimeSummary();
       renderWorkerList();
       renderCreateWorkerConfigs();
-      renderDatasetOptions();
       renderCreateResult();
       if (refreshTaskDetail && state.selectedTaskId) {
         await loadTaskDetail(state.selectedTaskId);
@@ -1093,26 +1021,6 @@ INDEX_HTML = """<!doctype html>
             (item.currentStep ? '<span>step: ' + esc(item.currentStep) + '</span>' : '') +
           '</div>' +
         '</div>';
-    }
-
-    function preferredDatasetRef() {
-      if (!state.datasets.length) return "";
-      const terminalBench = state.datasets.find(item => String(item.path || "").endsWith("/terminal-bench-2"));
-      return terminalBench ? terminalBench.path : (state.datasets[0] ? state.datasets[0].path : "");
-    }
-
-    function renderDatasetOptions() {
-      const input = document.getElementById("datasetPathInput");
-      const form = document.getElementById("createTaskForm");
-      if (!input || !form) return;
-      const previous = String(form.elements.datasetPath.value || "").trim();
-      if (previous) {
-        return;
-      }
-      const preferred = preferredDatasetRef();
-      if (preferred) {
-        form.elements.datasetPath.value = preferred;
-      }
     }
 
     function filteredTasks() {
@@ -2462,15 +2370,9 @@ INDEX_HTML = """<!doctype html>
     function collectCreateFormPayload(form) {
       const data = new FormData(form);
       const workerIds = data.getAll("workerIds").map(value => String(value));
-      const selectedCaseIds = String(data.get("selectedCaseIds") || "")
-        .split(/[\\n,]/)
-        .map(item => item.trim())
-        .filter(Boolean);
       return {
-        ...collectTaskConfigPayload(form),
-        name: String(data.get("name") || "").trim(),
+        harborYaml: String(data.get("harborYaml") || "").trim(),
         workerIds,
-        selectedCaseIds,
       };
     }
 
@@ -2481,6 +2383,10 @@ INDEX_HTML = """<!doctype html>
       const payload = collectCreateFormPayload(form);
       if (!payload.workerIds.length) {
         alert("至少选择一个 worker。");
+        return;
+      }
+      if (!payload.harborYaml) {
+        alert("请粘贴 Harbor YAML。");
         return;
       }
       if (submitBtn) {
@@ -2496,7 +2402,7 @@ INDEX_HTML = """<!doctype html>
         });
         state.createResult = result;
         renderCreateResult();
-        showToast("任务已创建，正在同步资产到 worker");
+        showToast("任务已创建，正在分发到 worker");
         if (result.syncJobId && result.run?.run_id) {
           startSyncPolling(result.run.run_id);
         } else {
