@@ -734,6 +734,50 @@ def test_job_archive_for_derived_exception_rerun_does_not_rebuild_from_sibling_j
     server.shutdown()
 
 
+def test_job_sources_for_derived_rerun_ignore_shared_jobs_dir_siblings(store, tmp_path):
+    run, _original_parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+            {"case_id": "exc-a", "status": "errored", "error_text": "ValueError: boom"},
+        ],
+    )
+    original_jobs_dir = tmp_path / "original-harbor" / "jobs"
+    original_job_dir = original_jobs_dir / sanitize_name(str(run["display_name"]))
+    (original_job_dir / "config.json").parent.mkdir(parents=True)
+    (original_job_dir / "config.json").write_text(
+        json.dumps({"job_name": original_job_dir.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
+    _write_jobs_trial(original_job_dir, "ok__old", task_name="ok")
+    original_exc_trial = _write_jobs_trial(original_job_dir, "exc-a__old", task_name="exc-a")
+    (original_exc_trial / "exception.txt").write_text(
+        "Traceback (most recent call last):\nValueError: boom\n",
+        encoding="utf-8",
+    )
+    sibling_job_dir = original_jobs_dir / "unrelated-shared-job"
+    (sibling_job_dir / "config.json").parent.mkdir(parents=True)
+    (sibling_job_dir / "config.json").write_text(
+        json.dumps({"job_name": sibling_job_dir.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
+    _write_jobs_trial(sibling_job_dir, "other__old", task_name="other")
+    store.update_task_template_executor_config(
+        str(run["template_id"]),
+        {"combinedJobsDir": str(original_jobs_dir)},
+    )
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(run["run_id"])
+    grouped_sources = _job_sources_for_run(
+        store=store,
+        run_id=result["runId"],
+        jobs_dir=original_jobs_dir,
+    )
+
+    all_sources = [source for _job_name, sources in grouped_sources for source in sources]
+    assert sibling_job_dir.resolve() not in all_sources
+
+
 def test_job_archive_imports_primary_job_archive_by_batch_id(store, tmp_path):
     run, batch = seed_finished_run_with_cases(
         store,

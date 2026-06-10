@@ -241,8 +241,13 @@ def _job_sources_for_run(
     is_derived_run = bool(run.get("parent_run_id"))
     sources: list[Path] = []
     primary_batches = store.list_primary_batches_for_run(run_id)
-    primary_batch_ids = {str(batch["batch_id"]) for batch in primary_batches}
-    if is_derived_run and _path_exists(jobs_dir):
+    expected_derived_jobs_dir = derived_jobs_dir_for_run(store=store, run=run)
+    if (
+        is_derived_run
+        and _path_exists(jobs_dir)
+        and _is_subpath(jobs_dir.resolve(), expected_derived_jobs_dir)
+    ):
+        primary_batch_ids = {str(batch["batch_id"]) for batch in primary_batches}
         for child in sorted(jobs_dir.iterdir(), key=lambda path: path.name):
             if (
                 child.is_dir()
