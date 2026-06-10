@@ -359,6 +359,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ensure_global_harbor_viewer(self, jobs_dir: str | None = None) -> dict[str, object]:
         harbor_repo, jobs_path = resolve_global_harbor_viewer_paths(jobs_dir)
+        if jobs_dir and self.viewer_manager is not None:
+            try:
+                jobs_path.mkdir(parents=True, exist_ok=True)
+                self._rebuild_merged_jobs(jobs_path)
+                viewer_id = sanitize_name(f"global-{jobs_path}")[:120]
+                session = self.viewer_manager.ensure_viewer(viewer_id=viewer_id, jobs_dir=jobs_path)
+                embedded_url = f"/harbor-viewer/{viewer_id}/"
+                return {
+                    "available": True,
+                    "url": embedded_url,
+                    "embeddedUrl": embedded_url,
+                    "viewerId": viewer_id,
+                    "jobsDir": str(jobs_path),
+                    "harborRepo": str(harbor_repo),
+                    "port": session.port,
+                }
+            except Exception as exc:
+                return {
+                    "available": False,
+                    "reason": str(exc),
+                    "jobsDir": str(jobs_path),
+                    "harborRepo": str(harbor_repo),
+                }
         try:
             with request.urlopen(f"http://127.0.0.1:{GLOBAL_VIEWER_PORT}/api/health", timeout=1):
                 return {
@@ -1051,7 +1074,15 @@ class Handler(BaseHTTPRequestHandler):
                 if batch_dir.exists():
                     shutil.rmtree(batch_dir)
                 imported_root.mkdir(parents=True, exist_ok=True)
-                _safe_extract_tar(archive, imported_root)
+                extract_root = imported_root / f".extract-{batch_id}-{new_id('tmp')}"
+                try:
+                    _safe_extract_tar(archive, extract_root)
+                    top_entries = list(extract_root.iterdir())
+                    if len(top_entries) != 1 or not top_entries[0].is_dir():
+                        raise RuntimeError("job archive must contain exactly one top-level directory")
+                    shutil.move(str(top_entries[0]), str(batch_dir))
+                finally:
+                    shutil.rmtree(extract_root, ignore_errors=True)
                 batch = self.store.get_batch(batch_id)
                 if batch:
                     is_exception_rerun = str(batch.get("batch_kind") or "") == "exception_rerun"
