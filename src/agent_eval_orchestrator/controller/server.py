@@ -77,6 +77,14 @@ def resolve_controller_viewer_harbor_repo() -> Path:
     return resolve_controller_harbor_repo()
 
 
+def resolve_controller_jobs_dir_from_harbor_config(config: dict[str, Any]) -> Path:
+    raw = str(config.get("jobs_dir") or "jobs").strip() or "jobs"
+    jobs_dir = Path(raw).expanduser()
+    if not jobs_dir.is_absolute():
+        jobs_dir = resolve_controller_viewer_harbor_repo() / jobs_dir
+    return jobs_dir.resolve()
+
+
 def _is_subpath(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -882,7 +890,7 @@ class Handler(BaseHTTPRequestHandler):
                 task_sources=task_sources,
             )
             yaml_by_batch_id = {}
-            combined_jobs_dir = str(derived_jobs_dir_for_run(store=self.store, run=run))
+            combined_jobs_dir = str(resolve_controller_jobs_dir_from_harbor_config(plan.original_config))
             for batch in batches:
                 jobs_dir = Path(str(batch["batch_root"])) / "harbor" / "jobs"
                 worker_id = str(batch["preferred_worker_id"])

@@ -7,8 +7,8 @@ from threading import Thread
 
 import yaml
 
+from agent_eval_orchestrator.controller import server as controller_server
 from agent_eval_orchestrator.controller.asset_syncer import AssetSyncer
-from agent_eval_orchestrator.controller.rerun_artifacts import derived_jobs_dir_for_run
 from agent_eval_orchestrator.controller.server import Handler, ThreadedServer
 from agent_eval_orchestrator.storage.store import Store
 
@@ -143,8 +143,10 @@ def test_create_task_local_worker_returns_pending_sync(store, tmp_path):
     server.shutdown()
 
 
-def test_create_task_yaml_first_syncs_dataset_and_rewrites_batch_yaml(store, tmp_path):
+def test_create_task_yaml_first_syncs_dataset_and_rewrites_batch_yaml(store, tmp_path, monkeypatch):
     dataset = tmp_path / "tasks"
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
     for name in ("alpha", "beta", "gamma"):
         case_dir = dataset / name
         case_dir.mkdir(parents=True)
@@ -206,7 +208,7 @@ datasets:
     assert config["harborYamlMode"] == "datasets"
     assert sorted(config["harborYamlByBatchId"]) == sorted(batch["batch_id"] for batch in payload["batches"])
     assert "bitfunCliPath" not in config
-    assert config["combinedJobsDir"] == str(derived_jobs_dir_for_run(store=store, run=payload["run"]))
+    assert config["combinedJobsDir"] == str((harbor_repo / "user-jobs").resolve())
     assert all(
         config["combinedJobsDir"] != str(Path(batch["batch_root"]) / "harbor" / "jobs")
         for batch in payload["batches"]
@@ -218,6 +220,51 @@ datasets:
         assert batch_yaml["datasets"][0]["path"] == str(
             workers_by_id[worker_id] / "sync" / payload["run"]["run_id"] / "dataset"
         )
+
+
+def test_create_task_yaml_first_defaults_combined_jobs_dir_to_harbor_jobs(store, tmp_path, monkeypatch):
+    dataset = tmp_path / "tasks"
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
+    case_dir = dataset / "alpha"
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
+    )
+    server = start_test_server(store, tmp_path, 9886)
+    conn = HTTPConnection("127.0.0.1", 9886)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+agents:
+  - name: codex
+    model_name: openai/gpt-4o
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+""",
+            "workerIds": ["local-a"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 201
+    assert payload["template"]["executor_config"]["combinedJobsDir"] == str((harbor_repo / "jobs").resolve())
 
 
 def test_create_task_yaml_first_rejects_invalid_worker(store, tmp_path):
