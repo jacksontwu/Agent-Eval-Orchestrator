@@ -57,7 +57,7 @@ def test_global_harbor_viewer_uses_proxy_session_for_requested_jobs_dir(tmp_path
         headers={"Host": "example.test:7380"},
         viewer_manager=manager,
         _viewer_public_url=lambda: "http://example.test:7369/",
-        _rebuild_merged_jobs=lambda jobs_dir: None,
+        _rebuild_merged_jobs=lambda jobs_dir, run_id=None: None,
     )
 
     result = Handler._ensure_global_harbor_viewer(handler, str(jobs_dir))

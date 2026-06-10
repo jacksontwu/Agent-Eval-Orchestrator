@@ -818,6 +818,43 @@ def test_rebuild_merged_jobs_limits_runs_to_requested_jobs_dir(store, tmp_path):
     assert not (jobs_dir_a / sanitize_name(str(run_b["display_name"]))).exists()
 
 
+def test_rebuild_merged_jobs_can_target_single_run_in_shared_jobs_dir(store, tmp_path):
+    run_a, batch_a = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "case-a", "status": "failed", "score": 0.0}],
+    )
+    run_b, batch_b = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "case-b", "status": "failed", "score": 0.0}],
+    )
+    run_a = store.update_run_display_name(str(run_a["run_id"]), "run-a") or run_a
+    run_b = store.update_run_display_name(str(run_b["run_id"]), "run-b") or run_b
+    jobs_dir = tmp_path / "harbor" / "jobs"
+    store.update_task_template_executor_config(
+        str(run_a["template_id"]),
+        {"combinedJobsDir": str(jobs_dir)},
+    )
+    store.update_task_template_executor_config(
+        str(run_b["template_id"]),
+        {"combinedJobsDir": str(jobs_dir)},
+    )
+    imported_root = store.layout.controller_dir / "imported-jobs"
+    job_a = imported_root / str(batch_a["batch_id"])
+    job_b = imported_root / str(batch_b["batch_id"])
+    _write_jobs_trial(job_a, "case-a__new", task_name="case-a")
+    _write_jobs_trial(job_b, "case-b__new", task_name="case-b")
+    (job_a / "config.json").write_text(json.dumps({"job_name": "job-a"}), encoding="utf-8")
+    (job_b / "config.json").write_text(json.dumps({"job_name": "job-b"}), encoding="utf-8")
+    handler = type("DummyHandler", (), {"store": store})()
+
+    with patch("agent_eval_orchestrator.normalizers.harbor_job_merge.finalize_job_result_with_harbor"):
+        merged_names = Handler._rebuild_merged_jobs(handler, jobs_dir, run_id=str(run_a["run_id"]))
+
+    assert merged_names == [sanitize_name(str(run_a["display_name"]))]
+    assert (jobs_dir / sanitize_name(str(run_a["display_name"])) / "case-a__new").exists()
+    assert not (jobs_dir / sanitize_name(str(run_b["display_name"]))).exists()
+
+
 def test_post_rerun_before_run_finished(store, tmp_path):
     template = store.create_task_template(
         owner="default",

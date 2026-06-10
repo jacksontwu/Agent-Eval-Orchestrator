@@ -356,10 +356,13 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8"))
 
-    def _rebuild_merged_jobs(self, jobs_dir: Path) -> list[str]:
+    def _rebuild_merged_jobs(self, jobs_dir: Path, *, run_id: str | None = None) -> list[str]:
         jobs_dir.mkdir(parents=True, exist_ok=True)
         merged_names: list[str] = []
-        for run in self.store.list_runs():
+        runs = [self.store.get_run(run_id)] if run_id else self.store.list_runs()
+        for run in runs:
+            if not run:
+                continue
             if not _run_uses_jobs_dir(store=self.store, run=run, jobs_dir=jobs_dir):
                 continue
             grouped_sources = _job_sources_for_run(
@@ -384,12 +387,12 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "").split(":")[0] or "127.0.0.1"
         return f"http://{host}:{GLOBAL_VIEWER_PORT}/"
 
-    def _ensure_global_harbor_viewer(self, jobs_dir: str | None = None) -> dict[str, object]:
+    def _ensure_global_harbor_viewer(self, jobs_dir: str | None = None, *, run_id: str | None = None) -> dict[str, object]:
         harbor_repo, jobs_path = resolve_global_harbor_viewer_paths(jobs_dir)
         if jobs_dir and self.viewer_manager is not None:
             try:
                 jobs_path.mkdir(parents=True, exist_ok=True)
-                self._rebuild_merged_jobs(jobs_path)
+                self._rebuild_merged_jobs(jobs_path, run_id=run_id)
                 viewer_id = sanitize_name(f"global-{jobs_path}")[:120]
                 session = self.viewer_manager.ensure_viewer(viewer_id=viewer_id, jobs_dir=jobs_path)
                 embedded_url = f"/harbor-viewer/{viewer_id}/"
@@ -693,7 +696,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/harbor-viewer/global":
             jobs_dir = str(qs.get("jobsDir", [""])[0]).strip() or None
-            _json_response(self, self._ensure_global_harbor_viewer(jobs_dir))
+            run_id = str(qs.get("runId", [""])[0]).strip() or None
+            _json_response(self, self._ensure_global_harbor_viewer(jobs_dir, run_id=run_id))
             return
         if path == "/api/files/read":
             raw_path = str(qs.get("path", [""])[0]).strip()
@@ -1137,7 +1141,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/harbor-viewer/global":
             jobs_dir = str(body.get("jobsDir") or "").strip() or None
-            _json_response(self, self._ensure_global_harbor_viewer(jobs_dir))
+            run_id = str(body.get("runId") or "").strip() or None
+            _json_response(self, self._ensure_global_harbor_viewer(jobs_dir, run_id=run_id))
             return
         if path == "/api/runs":
             try:
