@@ -79,7 +79,7 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
     assert "/root/.config/bitfun" in shell
 
 
-def test_prepare_rejects_bitfun_cli_mount_source_that_is_not_a_file(tmp_path: Path) -> None:
+def test_prepare_allows_bind_mount_source_that_is_directory(tmp_path: Path) -> None:
     batch_root = tmp_path / "batch-root"
     batch_root.mkdir()
     dataset = tmp_path / "dataset" / "case-a"
@@ -91,9 +91,49 @@ def test_prepare_rejects_bitfun_cli_mount_source_that_is_not_a_file(tmp_path: Pa
     bad_bitfun_cli = tmp_path / "bitfun-cli"
     bad_bitfun_cli.mkdir()
 
+    prepared = HarborExecutor().prepare(
+        batch={
+            "batch_id": "batch-test",
+            "batch_root": str(batch_root),
+            "selected_case_ids": ["case-a"],
+        },
+        run={},
+        template={},
+        dataset_ref=str(dataset.parent),
+        executor_config={
+            "agentName": "bitfun-cli",
+            "envType": "docker",
+            "nConcurrent": 1,
+            "mounts": [
+                {
+                    "type": "bind",
+                    "source": str(bad_bitfun_cli),
+                    "target": "/usr/local/bin/bitfun-cli",
+                    "read_only": True,
+                },
+            ],
+            "harborRepoPath": str(harbor_repo),
+        },
+        local_root=tmp_path / "local",
+        shared_root=None,
+    )
+    shell = " ".join(shlex.quote(part) for part in prepared.command)
+    assert str(bad_bitfun_cli) in shell
+
+
+def test_prepare_rejects_missing_bind_mount_source(tmp_path: Path) -> None:
+    batch_root = tmp_path / "batch-root"
+    batch_root.mkdir()
+    dataset = tmp_path / "dataset" / "case-a"
+    dataset.mkdir(parents=True)
+    (dataset / "task.toml").write_text("", encoding="utf-8")
+    harbor_repo = tmp_path / "harbor"
+    harbor_repo.mkdir()
+    missing = tmp_path / "missing"
+
     with pytest.raises(
         RuntimeError,
-        match=f"mount source for /usr/local/bin/bitfun-cli must be an executable file: {bad_bitfun_cli}",
+        match=f"bind mount source must exist as a file or directory: {missing}",
     ):
         HarborExecutor().prepare(
             batch={
@@ -105,14 +145,14 @@ def test_prepare_rejects_bitfun_cli_mount_source_that_is_not_a_file(tmp_path: Pa
             template={},
             dataset_ref=str(dataset.parent),
             executor_config={
-                "agentName": "bitfun-cli",
+                "agentName": "codeagent",
                 "envType": "docker",
                 "nConcurrent": 1,
                 "mounts": [
                     {
                         "type": "bind",
-                        "source": str(bad_bitfun_cli),
-                        "target": "/usr/local/bin/bitfun-cli",
+                        "source": str(missing),
+                        "target": "/usr/local/bin/codeagentcli",
                         "read_only": True,
                     },
                 ],

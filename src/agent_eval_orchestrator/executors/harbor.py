@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import shutil
 from pathlib import Path
@@ -21,9 +20,6 @@ from agent_eval_orchestrator.core.worker_paths import resolve_harbor_repo, resol
 from agent_eval_orchestrator.executors.base import CollectedArtifacts, Executor, PreparedBatch
 
 
-BITFUN_CLI_CONTAINER_PATH = "/usr/local/bin/bitfun-cli"
-
-
 def _copy_selected_tasks(dataset_path: Path, selected_case_ids: list[str], target_root: Path) -> Path:
     target_root.mkdir(parents=True, exist_ok=True)
     for case_id in selected_case_ids:
@@ -34,17 +30,17 @@ def _copy_selected_tasks(dataset_path: Path, selected_case_ids: list[str], targe
     return target_root
 
 
-def _validate_bitfun_cli_mount(mounts: Any) -> None:
+def _validate_bind_mount_sources(mounts: Any) -> None:
     if not isinstance(mounts, list):
         return
     for mount in mounts:
-        if not isinstance(mount, dict) or mount.get("target") != BITFUN_CLI_CONTAINER_PATH:
+        if not isinstance(mount, dict):
+            continue
+        if str(mount.get("type") or "").strip() != "bind":
             continue
         source = Path(str(mount.get("source") or "")).expanduser()
-        if not source.is_file() or not os.access(source, os.X_OK):
-            raise RuntimeError(
-                f"mount source for {BITFUN_CLI_CONTAINER_PATH} must be an executable file: {source}"
-            )
+        if not source.exists() or not (source.is_file() or source.is_dir()):
+            raise RuntimeError(f"bind mount source must exist as a file or directory: {source}")
 
 
 class HarborExecutor(Executor):
@@ -286,7 +282,7 @@ class HarborExecutor(Executor):
         harbor_args.append("--delete" if delete_environment else "--no-delete")
         mounts = self._resolve_worker_override(executor_config, worker_id, "mounts", None)
         if mounts:
-            _validate_bitfun_cli_mount(mounts)
+            _validate_bind_mount_sources(mounts)
             harbor_args.extend(["--mounts", json.dumps(mounts, ensure_ascii=False)])
         for extra_arg in executor_config.get("extraArgs") or []:
             harbor_args.append(str(extra_arg))
