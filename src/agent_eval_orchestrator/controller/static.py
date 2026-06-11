@@ -387,6 +387,9 @@ INDEX_HTML = """<!doctype html>
       align-items: center;
       flex-wrap: wrap;
     }
+    .field + .actions {
+      margin-top: 14px;
+    }
     pre {
       margin: 0;
       background: #0d1822;
