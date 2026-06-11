@@ -16,7 +16,7 @@ from typing import Any
 from urllib import error, request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from agent_eval_orchestrator.core.defaults import (
     DEFAULT_HARBOR_REPO,
@@ -69,6 +69,22 @@ def resolve_global_harbor_viewer_paths(jobs_dir: str | None = None) -> tuple[Pat
     raw = str(jobs_dir or DEFAULT_JOBS_DIR).strip() or str(DEFAULT_JOBS_DIR)
     jobs_path = Path(raw).expanduser().resolve()
     return jobs_path.parent, jobs_path
+
+
+def resolve_external_harbor_viewer_url() -> str | None:
+    raw_url = str(os.environ.get("AEO_HARBOR_VIEWER_URL") or "").strip()
+    if not raw_url:
+        return None
+    parsed = urlparse(raw_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(
+            "AEO_HARBOR_VIEWER_URL must be a full URL, for example http://127.0.0.1:7369"
+        )
+    return raw_url.rstrip("/") + "/"
+
+
+def external_harbor_viewer_health_url(base_url: str) -> str:
+    return urljoin(base_url, "api/health")
 
 
 def resolve_controller_viewer_harbor_repo() -> Path:
@@ -407,41 +423,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _ensure_global_harbor_viewer(self, jobs_dir: str | None = None, *, run_id: str | None = None) -> dict[str, object]:
         harbor_repo, jobs_path = resolve_global_harbor_viewer_paths(jobs_dir)
-        if jobs_dir and self.viewer_manager is not None:
-            try:
-                jobs_path.mkdir(parents=True, exist_ok=True)
-                self._rebuild_merged_jobs(jobs_path, run_id=run_id)
-                viewer_id = sanitize_name(f"global-{jobs_path}")[:120]
-                session = self.viewer_manager.ensure_viewer(viewer_id=viewer_id, jobs_dir=jobs_path)
-                embedded_url = f"/harbor-viewer/{viewer_id}/"
-                return {
-                    "available": True,
-                    "url": embedded_url,
-                    "embeddedUrl": embedded_url,
-                    "viewerId": viewer_id,
-                    "jobsDir": str(jobs_path),
-                    "harborRepo": str(harbor_repo),
-                    "port": session.port,
-                }
-            except Exception as exc:
-                return {
-                    "available": False,
-                    "reason": str(exc),
-                    "jobsDir": str(jobs_path),
-                    "harborRepo": str(harbor_repo),
-                }
-        try:
-            with request.urlopen(f"http://127.0.0.1:{GLOBAL_VIEWER_PORT}/api/health", timeout=1):
-                return {
-                    "available": True,
-                    "url": self._viewer_public_url(),
-                    "jobsDir": str(jobs_path),
-                    "harborRepo": str(harbor_repo),
-                    "port": GLOBAL_VIEWER_PORT,
-                }
-        except Exception:
-            pass
-
         try:
             jobs_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -452,47 +433,50 @@ class Handler(BaseHTTPRequestHandler):
                 "harborRepo": str(harbor_repo),
             }
 
-        self._rebuild_merged_jobs(jobs_path)
-        normalize_jobs_dir(jobs_path)
+        try:
+            self._rebuild_merged_jobs(jobs_path, run_id=run_id)
+            normalize_jobs_dir(jobs_path)
+        except Exception as exc:
+            return {
+                "available": False,
+                "reason": str(exc),
+                "jobsDir": str(jobs_path),
+                "harborRepo": str(harbor_repo),
+            }
 
-        if self.global_viewer_process and self.global_viewer_process.poll() is None:
-            self.global_viewer_process.terminate()
-        log_path = self.store.layout.controller_dir / "logs" / f"harbor-viewer-{GLOBAL_VIEWER_PORT}.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_handle = log_path.open("a", encoding="utf-8")
-        command = [
-            "/bin/bash",
-            "-lc",
-            (
-                f"cd {harbor_repo} && "
-                f"uv run harbor view {jobs_path} --port {GLOBAL_VIEWER_PORT} --host 0.0.0.0 --no-build"
-            ),
-        ]
-        self.__class__.global_viewer_process = subprocess.Popen(
-            command,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            try:
-                with request.urlopen(f"http://127.0.0.1:{GLOBAL_VIEWER_PORT}/api/health", timeout=1):
-                    return {
-                        "available": True,
-                        "url": self._viewer_public_url(),
-                        "jobsDir": str(jobs_path),
-                        "harborRepo": str(harbor_repo),
-                        "port": GLOBAL_VIEWER_PORT,
-                    }
-            except Exception:
-                time.sleep(0.5)
-        return {
-            "available": False,
-            "reason": "Harbor viewer did not become ready",
-            "jobsDir": str(jobs_path),
-            "harborRepo": str(harbor_repo),
-        }
+        try:
+            viewer_url = resolve_external_harbor_viewer_url()
+        except RuntimeError as exc:
+            return {
+                "available": False,
+                "reason": str(exc),
+                "jobsDir": str(jobs_path),
+                "harborRepo": str(harbor_repo),
+            }
+        if not viewer_url:
+            return {
+                "available": False,
+                "reason": "Harbor Viewer 未配置，请设置 AEO_HARBOR_VIEWER_URL 并手动启动 harbor view",
+                "jobsDir": str(jobs_path),
+                "harborRepo": str(harbor_repo),
+            }
+
+        try:
+            with request.urlopen(external_harbor_viewer_health_url(viewer_url), timeout=1):
+                return {
+                    "available": True,
+                    "url": viewer_url,
+                    "embeddedUrl": viewer_url,
+                    "jobsDir": str(jobs_path),
+                    "harborRepo": str(harbor_repo),
+                }
+        except Exception as exc:
+            return {
+                "available": False,
+                "reason": f"Harbor Viewer 不可用: {viewer_url} ({exc})",
+                "jobsDir": str(jobs_path),
+                "harborRepo": str(harbor_repo),
+            }
 
     def _is_loopback_client(self) -> bool:
         host = self.client_address[0]

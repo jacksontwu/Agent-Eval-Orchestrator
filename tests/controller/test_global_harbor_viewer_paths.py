@@ -1,4 +1,3 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 from agent_eval_orchestrator.controller import server
@@ -34,9 +33,27 @@ def test_resolve_controller_viewer_harbor_repo_falls_back_to_harbor_probe(tmp_pa
     assert resolve_controller_viewer_harbor_repo() == harbor_repo
 
 
-def test_global_harbor_viewer_uses_proxy_session_for_requested_jobs_dir(tmp_path, monkeypatch) -> None:
+def test_global_harbor_viewer_requires_external_url(tmp_path, monkeypatch) -> None:
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir()
+    monkeypatch.delenv("AEO_HARBOR_VIEWER_URL", raising=False)
+
+    handler = SimpleNamespace(
+        _rebuild_merged_jobs=lambda jobs_dir, run_id=None: None,
+    )
+
+    result = Handler._ensure_global_harbor_viewer(handler, str(jobs_dir))
+
+    assert result["available"] is False
+    assert "AEO_HARBOR_VIEWER_URL" in result["reason"]
+    assert result["jobsDir"] == str(jobs_dir.resolve())
+
+
+def test_global_harbor_viewer_returns_configured_external_url(tmp_path, monkeypatch) -> None:
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    monkeypatch.setenv("AEO_HARBOR_VIEWER_URL", "http://viewer.example.test:7369/")
+    seen_urls = []
 
     class HealthyResponse:
         def __enter__(self):
@@ -45,25 +62,39 @@ def test_global_harbor_viewer_uses_proxy_session_for_requested_jobs_dir(tmp_path
         def __exit__(self, exc_type, exc, tb):
             return False
 
-    class FakeViewerManager:
-        def ensure_viewer(self, *, viewer_id: str, jobs_dir: Path):
-            self.viewer_id = viewer_id
-            self.jobs_dir = jobs_dir
-            return SimpleNamespace(viewer_id=viewer_id, port=18100)
+    def fake_urlopen(url, timeout):
+        seen_urls.append(url)
+        return HealthyResponse()
 
-    manager = FakeViewerManager()
-    monkeypatch.setattr(server.request, "urlopen", lambda *args, **kwargs: HealthyResponse())
+    monkeypatch.setattr(server.request, "urlopen", fake_urlopen)
     handler = SimpleNamespace(
-        headers={"Host": "example.test:7380"},
-        viewer_manager=manager,
-        _viewer_public_url=lambda: "http://example.test:7369/",
+        _rebuild_merged_jobs=lambda jobs_dir, run_id=None: None,
+    )
+
+    result = Handler._ensure_global_harbor_viewer(handler, str(jobs_dir), run_id="run-1")
+
+    assert result["available"] is True
+    assert result["url"] == "http://viewer.example.test:7369/"
+    assert result["embeddedUrl"] == "http://viewer.example.test:7369/"
+    assert result["jobsDir"] == str(jobs_dir.resolve())
+    assert seen_urls == ["http://viewer.example.test:7369/api/health"]
+
+
+def test_global_harbor_viewer_reports_unhealthy_external_url(tmp_path, monkeypatch) -> None:
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    monkeypatch.setenv("AEO_HARBOR_VIEWER_URL", "http://127.0.0.1:65530")
+
+    def fake_urlopen(url, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(server.request, "urlopen", fake_urlopen)
+    handler = SimpleNamespace(
         _rebuild_merged_jobs=lambda jobs_dir, run_id=None: None,
     )
 
     result = Handler._ensure_global_harbor_viewer(handler, str(jobs_dir))
 
-    assert result["available"] is True
-    assert result["url"].startswith("/harbor-viewer/global-")
-    assert result["embeddedUrl"] == result["url"]
-    assert result["jobsDir"] == str(jobs_dir.resolve())
-    assert manager.jobs_dir == jobs_dir.resolve()
+    assert result["available"] is False
+    assert "http://127.0.0.1:65530" in result["reason"]
+    assert "connection refused" in result["reason"]
