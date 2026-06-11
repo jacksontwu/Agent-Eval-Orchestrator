@@ -982,11 +982,28 @@ INDEX_HTML = """<!doctype html>
       renderWorkerList();
       renderCreateWorkerConfigs();
       renderCreateResult();
-      if (refreshTaskDetail && state.selectedTaskId) {
-        await loadTaskDetail(state.selectedTaskId);
+      if (refreshTaskDetail) {
+        await ensureDefaultTaskDetail();
       }
       if (state.selectedWorkerId) {
         renderWorkerDetail();
+      }
+    }
+
+    async function ensureDefaultTaskDetail() {
+      if (!state.selectedTaskId) {
+        const firstTask = filteredTasks()[0];
+        if (!firstTask) return;
+        state.selectedTaskId = firstTask.evalTaskId;
+        state.selectedCase = null;
+        state.caseDetails = {};
+        state.caseDetailLoading = {};
+        state.filePreview = null;
+        state.viewerInfo = null;
+        renderTaskList();
+      }
+      if (state.selectedTaskId) {
+        await loadTaskDetail(state.selectedTaskId);
       }
     }
 
