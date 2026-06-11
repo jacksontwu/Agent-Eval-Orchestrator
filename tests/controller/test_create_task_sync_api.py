@@ -222,7 +222,147 @@ datasets:
         )
 
 
-def test_create_task_yaml_first_syncs_bitfun_mounts_and_rewrites_worker_yaml(store, tmp_path, monkeypatch):
+def test_create_task_yaml_first_syncs_bind_file_and_rewrites_all_references(store, tmp_path, monkeypatch):
+    dataset = tmp_path / "tasks"
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
+    case_dir = dataset / "alpha"
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    codeagent = tmp_path / "codeagentcli"
+    codeagent.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(codeagent, 0o755)
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
+    )
+    server = start_test_server(store, tmp_path, 0)
+    port = server.server_address[1]
+    conn = HTTPConnection("127.0.0.1", port)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+agents:
+  - name: codeagent
+    kwargs:
+      install_mode: binary
+      binary_path: {codeagent}
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+environment:
+  type: docker
+  mounts:
+    - type: bind
+      source: {codeagent}
+      target: /usr/local/bin/codeagentcli
+      read_only: true
+""",
+            "workerIds": ["local-a"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 201
+    manifest = payload["run"]["sync_manifest"]
+    assert manifest["bindAssets"] == [
+        {
+            "source": str(codeagent.resolve()),
+            "kind": "file",
+            "targetName": "codeagentcli",
+        }
+    ]
+    batch = payload["batches"][0]
+    batch_yaml = yaml.safe_load(payload["template"]["executor_config"]["harborYamlByBatchId"][batch["batch_id"]])
+    target = str(tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "assets" / "codeagentcli")
+    assert batch_yaml["environment"]["mounts"][0]["source"] == target
+    assert batch_yaml["agents"][0]["kwargs"]["binary_path"] == target
+
+
+def test_create_task_yaml_first_rewrites_bind_directory_child_paths_with_longest_prefix(store, tmp_path, monkeypatch):
+    dataset = tmp_path / "tasks"
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
+    case_dir = dataset / "alpha"
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    tools_dir = tmp_path / "tools"
+    nested_dir = tools_dir / "codeagent"
+    nested_dir.mkdir(parents=True)
+    (nested_dir / "codeagentcli").write_text("#!/bin/sh\n", encoding="utf-8")
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
+    )
+    server = start_test_server(store, tmp_path, 0)
+    port = server.server_address[1]
+    conn = HTTPConnection("127.0.0.1", port)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+agents:
+  - name: codeagent
+    kwargs:
+      install_mode: binary
+      binary_path: {nested_dir / "codeagentcli"}
+      untouched_text: prefix:{nested_dir / "codeagentcli"}
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+environment:
+  type: docker
+  mounts:
+    - type: bind
+      source: {tools_dir}
+      target: /opt/tools
+      read_only: true
+    - type: bind
+      source: {nested_dir}
+      target: /opt/codeagent
+      read_only: true
+""",
+            "workerIds": ["local-a"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 201
+    batch = payload["batches"][0]
+    batch_yaml = yaml.safe_load(payload["template"]["executor_config"]["harborYamlByBatchId"][batch["batch_id"]])
+    root = tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "assets"
+    assert batch_yaml["environment"]["mounts"][0]["source"] == str(root / "tools")
+    assert batch_yaml["environment"]["mounts"][1]["source"] == str(root / "codeagent")
+    assert batch_yaml["agents"][0]["kwargs"]["binary_path"] == str(root / "codeagent" / "codeagentcli")
+    assert batch_yaml["agents"][0]["kwargs"]["untouched_text"].startswith("prefix:")
+
+
+def test_create_task_yaml_first_syncs_bind_mounts_and_rewrites_worker_yaml(store, tmp_path, monkeypatch):
     dataset = tmp_path / "tasks"
     harbor_repo = tmp_path / "harbor"
     monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
@@ -243,8 +383,9 @@ def test_create_task_yaml_first_syncs_bitfun_mounts_and_rewrites_worker_yaml(sto
         slots_used=0,
         capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
     )
-    server = start_test_server(store, tmp_path, 9887)
-    conn = HTTPConnection("127.0.0.1", 9887)
+    server = start_test_server(store, tmp_path, 0)
+    port = server.server_address[1]
+    conn = HTTPConnection("127.0.0.1", port)
     body = json.dumps(
         {
             "harborYaml": f"""
@@ -280,14 +421,119 @@ environment:
 
     assert resp.status == 201
     manifest = payload["run"]["sync_manifest"]
-    assert manifest["bitfunCliPath"] == str(bitfun_cli.resolve())
-    assert manifest["bitfunConfigDir"] == str(bitfun_config.resolve())
+    assert manifest["bindAssets"] == [
+        {"source": str(bitfun_cli.resolve()), "kind": "file", "targetName": "bitfun-cli"},
+        {"source": str(bitfun_config.resolve()), "kind": "directory", "targetName": "bitfun-config"},
+    ]
     batch = payload["batches"][0]
     batch_yaml = yaml.safe_load(payload["template"]["executor_config"]["harborYamlByBatchId"][batch["batch_id"]])
     mounts = batch_yaml["environment"]["mounts"]
-    assert mounts[0]["source"] == str(tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "bitfun" / "bitfun-cli")
-    assert mounts[1]["source"] == str(tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "bitfun" / "config")
-    assert mounts[1]["target"] == "/root/.config/bitfun/config"
+    assert mounts[0]["source"] == str(tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "assets" / "bitfun-cli")
+    assert mounts[1]["source"] == str(tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "assets" / "bitfun-config")
+    assert mounts[1]["target"] == "/root/.config/bitfun"
+
+
+def test_create_task_yaml_first_rejects_missing_bind_source(store, tmp_path, monkeypatch):
+    dataset = tmp_path / "tasks"
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
+    case_dir = dataset / "alpha"
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    missing = tmp_path / "missing-binary"
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
+    )
+    server = start_test_server(store, tmp_path, 0)
+    port = server.server_address[1]
+    conn = HTTPConnection("127.0.0.1", port)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+agents:
+  - name: codeagent
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+environment:
+  mounts:
+    - type: bind
+      source: {missing}
+      target: /usr/local/bin/missing
+""",
+            "workerIds": ["local-a"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 400
+    assert "environment.mounts[0].source not found on controller" in payload["error"]
+    assert store.list_runs() == []
+
+
+def test_create_task_yaml_first_rejects_relative_bind_source(store, tmp_path, monkeypatch):
+    dataset = tmp_path / "tasks"
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
+    case_dir = dataset / "alpha"
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
+    )
+    server = start_test_server(store, tmp_path, 0)
+    port = server.server_address[1]
+    conn = HTTPConnection("127.0.0.1", port)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+agents:
+  - name: codeagent
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+environment:
+  mounts:
+    - type: bind
+      source: relative/codeagentcli
+      target: /usr/local/bin/codeagentcli
+""",
+            "workerIds": ["local-a"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 400
+    assert "environment.mounts[0].source must be an absolute path" in payload["error"]
+    assert store.list_runs() == []
 
 
 def test_create_task_yaml_first_defaults_combined_jobs_dir_to_harbor_jobs(store, tmp_path, monkeypatch):

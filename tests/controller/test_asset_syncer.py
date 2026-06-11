@@ -11,6 +11,8 @@ from agent_eval_orchestrator.controller.asset_syncer import (
     is_local_worker,
     set_worker_step_status,
     sync_bitfun_local,
+    sync_bind_asset_local,
+    sync_bind_asset_remote,
     sync_cases_local,
     validate_create_task_assets,
     worker_executor_paths,
@@ -204,8 +206,9 @@ def test_worker_executor_paths():
 
 
 def test_initial_worker_steps_and_status():
-    steps = initial_worker_steps(["worker-a", "worker-b"])
+    steps = initial_worker_steps(["worker-a", "worker-b"], include_assets=True)
     assert len(steps) == 2
+    assert [step["id"] for step in steps[0]["steps"]] == ["sync_cases", "sync_assets"]
     updated = set_worker_step_status(steps, "worker-a", "sync_cases", "running")
     worker_a = next(item for item in updated if item["workerId"] == "worker-a")
     assert worker_a["steps"][0]["status"] == "running"
@@ -244,6 +247,29 @@ def test_sync_bitfun_local_preserves_executable(tmp_path):
     assert not (target / "bitfun" / "data").exists()
 
 
+def test_sync_bind_asset_local_copies_file_and_preserves_executable(tmp_path):
+    source = tmp_path / "codeagentcli"
+    source.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(source, 0o755)
+    target = tmp_path / "target" / "assets" / "codeagentcli"
+
+    sync_bind_asset_local(source_path=source, kind="file", target_path=target)
+
+    assert target.read_text(encoding="utf-8") == "#!/bin/sh\n"
+    assert os.access(target, os.X_OK)
+
+
+def test_sync_bind_asset_local_copies_directory(tmp_path):
+    source = tmp_path / "config"
+    source.mkdir()
+    (source / "settings.json").write_text("{}", encoding="utf-8")
+    target = tmp_path / "target" / "assets" / "config"
+
+    sync_bind_asset_local(source_path=source, kind="directory", target_path=target)
+
+    assert (target / "settings.json").read_text(encoding="utf-8") == "{}"
+
+
 def test_sync_cases_remote_uses_rsync(sample_ssh_config, tmp_path):
     from agent_eval_orchestrator.controller.asset_syncer import sync_cases_remote
 
@@ -261,15 +287,50 @@ def test_sync_cases_remote_uses_rsync(sample_ssh_config, tmp_path):
     assert runner.rsync_dir.call_count == 1
 
 
+def test_sync_bind_asset_remote_uses_scp_for_file(tmp_path):
+    source = tmp_path / "codeagentcli"
+    source.write_text("#!/bin/sh\n", encoding="utf-8")
+    runner = MagicMock()
+
+    sync_bind_asset_remote(
+        ssh=runner,
+        host_alias="aeo-ecs-0004",
+        source_path=source,
+        kind="file",
+        target_path="/tmp/sync/run-1/assets/codeagentcli",
+    )
+
+    runner.remote_mkdir_p.assert_called_once_with("aeo-ecs-0004", "/tmp/sync/run-1/assets")
+    runner.scp_file.assert_called_once_with(source, "aeo-ecs-0004:/tmp/sync/run-1/assets/codeagentcli")
+    runner.rsync_dir.assert_not_called()
+
+
+def test_sync_bind_asset_remote_uses_rsync_for_directory(tmp_path):
+    source = tmp_path / "config"
+    source.mkdir()
+    runner = MagicMock()
+
+    sync_bind_asset_remote(
+        ssh=runner,
+        host_alias="aeo-ecs-0004",
+        source_path=source,
+        kind="directory",
+        target_path="/tmp/sync/run-1/assets/config",
+    )
+
+    runner.remote_mkdir_p.assert_called_once_with("aeo-ecs-0004", "/tmp/sync/run-1/assets")
+    runner.rsync_dir.assert_called_once_with(source, "aeo-ecs-0004:/tmp/sync/run-1/assets/config/", remote=True)
+    runner.scp_file.assert_not_called()
+
+
 def test_asset_syncer_promotes_batches_on_success(store, tmp_path, sample_ssh_config):
     dataset = tmp_path / "dataset"
     case_a = dataset / "case-a"
     case_a.mkdir(parents=True)
     (case_a / "task.toml").write_text("", encoding="utf-8")
-    bitfun_cli = tmp_path / "bitfun-cli"
-    bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
-    os.chmod(bitfun_cli, 0o755)
-    config_dir = _make_bitfun_config_root(tmp_path / "bitfun-config")
+    codeagent = tmp_path / "codeagentcli"
+    codeagent.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(codeagent, 0o755)
     shared = tmp_path / "runtime"
 
     store.register_worker(
@@ -299,8 +360,9 @@ def test_asset_syncer_promotes_batches_on_success(store, tmp_path, sample_ssh_co
     )
     manifest = {
         "datasetPath": str(dataset),
-        "bitfunCliPath": str(bitfun_cli),
-        "bitfunConfigDir": str(config_dir),
+        "bindAssets": [
+            {"source": str(codeagent), "kind": "file", "targetName": "codeagentcli"},
+        ],
         "workers": {
             "local-a": {
                 "caseIds": ["case-a"],
@@ -328,9 +390,11 @@ def test_asset_syncer_promotes_batches_on_success(store, tmp_path, sample_ssh_co
     assert claimed is not None
     updated_template = store.get_task_template(template["template_id"])
     assert updated_template["executor_config"]["datasetPathByWorker"]["local-a"].endswith("/dataset")
-    mounts = updated_template["executor_config"]["mountsByWorker"]["local-a"]
-    assert mounts[1]["source"].endswith("/bitfun/bitfun-cli")
-    assert mounts[2]["source"].endswith("/bitfun/config")
+    asset_paths = updated_template["executor_config"]["assetPathsByWorker"]["local-a"]
+    copied_codeagent = shared / "sync" / run["run_id"] / "assets" / "codeagentcli"
+    assert asset_paths[str(codeagent)] == str(copied_codeagent)
+    assert copied_codeagent.read_text(encoding="utf-8") == "#!/bin/sh\n"
+    assert os.access(copied_codeagent, os.X_OK)
 
 
 def test_cleanup_run_sync_assets_local(store, tmp_path, sample_ssh_config):

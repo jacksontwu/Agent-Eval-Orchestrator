@@ -14,11 +14,6 @@ class HarborYamlError(ValueError):
     """Raised when submitted Harbor YAML cannot be distributed by AEO."""
 
 
-BITFUN_CLI_TARGET = "/usr/local/bin/bitfun-cli"
-BITFUN_CONFIG_TARGET = "/root/.config/bitfun"
-BITFUN_CONFIG_DIR_TARGET = "/root/.config/bitfun/config"
-
-
 @dataclass(frozen=True)
 class HarborYamlPlan:
     original_yaml: str
@@ -29,6 +24,13 @@ class HarborYamlPlan:
     generated_job_name: str
     timestamp: str
     tasks_by_id: dict[str, dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class BindAsset:
+    source: str
+    kind: str
+    target_name: str
 
 
 def parse_harbor_yaml(raw_yaml: str, *, timestamp: str | None = None) -> HarborYamlPlan:
@@ -76,6 +78,7 @@ def build_batch_harbor_yaml(
     jobs_dir: str,
     worker_dataset_path: str | None = None,
     worker_sync_root: str | None = None,
+    bind_assets: list[BindAsset] | None = None,
 ) -> str:
     if not selected_task_ids:
         raise HarborYamlError(f"batch {batch_id} has no selected task ids")
@@ -101,26 +104,101 @@ def build_batch_harbor_yaml(
                 task["path"] = str(Path(worker_dataset_path) / task_id)
             tasks.append(task)
         payload["tasks"] = tasks
-    if worker_sync_root:
-        _rewrite_bitfun_mounts(payload, worker_sync_root=worker_sync_root)
+    if worker_sync_root and worker_dataset_path:
+        rewrite_map = build_worker_rewrite_map(
+            dataset_path=plan.dataset_ref,
+            worker_dataset_path=worker_dataset_path,
+            bind_assets=bind_assets or [],
+            worker_sync_root=worker_sync_root,
+        )
+        payload = rewrite_yaml_paths(payload, rewrite_map)
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
 
-def extract_bitfun_mount_paths(config: dict[str, Any]) -> tuple[Path | None, Path | None]:
-    mounts = _environment_mounts(config)
-    bitfun_cli_path: Path | None = None
-    bitfun_config_dir: Path | None = None
-    for mount in mounts:
-        target = _normalized_target(mount)
-        source = Path(str(mount.get("source") or "")).expanduser()
-        if target == BITFUN_CLI_TARGET:
-            bitfun_cli_path = source.resolve()
-        elif target == BITFUN_CONFIG_TARGET:
-            bitfun_config_dir = source.resolve()
-        elif target == BITFUN_CONFIG_DIR_TARGET:
-            resolved = source.resolve()
-            bitfun_config_dir = resolved.parent if resolved.name == "config" else resolved
-    return bitfun_cli_path, bitfun_config_dir
+def discover_bind_assets(config: dict[str, Any]) -> list[BindAsset]:
+    assets: list[BindAsset] = []
+    seen: set[str] = set()
+    used_names: set[str] = set()
+    for index, mount in enumerate(_environment_mounts(config)):
+        mount_type = str(mount.get("type") or "").strip()
+        if mount_type != "bind":
+            continue
+        raw_source = str(mount.get("source") or "").strip()
+        if not raw_source:
+            raise HarborYamlError(f"environment.mounts[{index}].source is required for bind mounts")
+        source = Path(raw_source).expanduser()
+        if not source.is_absolute():
+            raise HarborYamlError(f"environment.mounts[{index}].source must be an absolute path: {raw_source}")
+        resolved = source.resolve()
+        if not resolved.exists():
+            raise HarborYamlError(f"environment.mounts[{index}].source not found on controller: {resolved}")
+        if resolved.is_file():
+            kind = "file"
+        elif resolved.is_dir():
+            kind = "directory"
+        else:
+            raise HarborYamlError(f"environment.mounts[{index}].source must be a file or directory: {resolved}")
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        assets.append(
+            BindAsset(
+                source=key,
+                kind=kind,
+                target_name=_stable_asset_name(resolved, used_names),
+            )
+        )
+    return assets
+
+
+def _stable_asset_name(source: Path, used_names: set[str]) -> str:
+    base = sanitize_name(source.name or "asset")
+    if not base:
+        base = "asset"
+    name = base
+    suffix = 2
+    while name in used_names:
+        name = f"{base}-{suffix}"
+        suffix += 1
+    used_names.add(name)
+    return name
+
+
+def build_worker_rewrite_map(
+    *,
+    dataset_path: str,
+    worker_dataset_path: str,
+    bind_assets: list[BindAsset],
+    worker_sync_root: str,
+) -> dict[str, str]:
+    mapping = {str(Path(dataset_path).expanduser().resolve()): str(Path(worker_dataset_path))}
+    asset_root = Path(worker_sync_root) / "assets"
+    for asset in bind_assets:
+        mapping[asset.source] = str(asset_root / asset.target_name)
+    return mapping
+
+
+def rewrite_yaml_paths(value: Any, rewrite_map: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {key: rewrite_yaml_paths(item, rewrite_map) for key, item in value.items()}
+    if isinstance(value, list):
+        return [rewrite_yaml_paths(item, rewrite_map) for item in value]
+    if isinstance(value, str):
+        return _rewrite_path_string(value, rewrite_map)
+    return value
+
+
+def _rewrite_path_string(value: str, rewrite_map: dict[str, str]) -> str:
+    if not value.startswith("/"):
+        return value
+    ordered = sorted(rewrite_map.items(), key=lambda item: len(item[0]), reverse=True)
+    for source, target in ordered:
+        if value == source:
+            return target
+        if value.startswith(f"{source}/"):
+            return f"{target}/{value[len(source) + 1:]}"
+    return value
 
 
 def _environment_mounts(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -131,21 +209,6 @@ def _environment_mounts(config: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(mounts, list):
         return []
     return [mount for mount in mounts if isinstance(mount, dict)]
-
-
-def _normalized_target(mount: dict[str, Any]) -> str:
-    return str(mount.get("target") or "").rstrip("/")
-
-
-def _rewrite_bitfun_mounts(config: dict[str, Any], *, worker_sync_root: str) -> None:
-    root = str(Path(worker_sync_root))
-    for mount in _environment_mounts(config):
-        target = _normalized_target(mount)
-        if target == BITFUN_CLI_TARGET:
-            mount["source"] = f"{root}/bitfun/bitfun-cli"
-        elif target in (BITFUN_CONFIG_TARGET, BITFUN_CONFIG_DIR_TARGET):
-            mount["source"] = f"{root}/bitfun/config"
-            mount["target"] = BITFUN_CONFIG_DIR_TARGET
 
 
 def _resolve_dataset_tasks(config: dict[str, Any]) -> tuple[str, list[str], dict[str, dict[str, Any]]]:
