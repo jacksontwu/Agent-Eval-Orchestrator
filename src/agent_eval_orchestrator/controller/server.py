@@ -9,9 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import tarfile
-import time
 from typing import Any
 from urllib import error, request
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -59,7 +57,6 @@ from agent_eval_orchestrator.storage.layout import default_layout
 from agent_eval_orchestrator.storage.store import Store
 
 
-GLOBAL_VIEWER_PORT = 7369
 DEFAULT_OWNER = "demo"
 DEFAULT_JOBS_DIR = DEFAULT_HARBOR_REPO / "jobs"
 DEFAULT_IMPORTED_JOBS_DIRNAME = "imported-jobs"
@@ -374,7 +371,6 @@ class Handler(BaseHTTPRequestHandler):
     store: Store
     auth_token: str | None = None
     viewer_manager: HarborViewerManager | None = None
-    global_viewer_process: subprocess.Popen | None = None
     provisioner: Provisioner | None = None
     worker_updater: WorkerUpdater | None = None
     asset_syncer: AssetSyncer | None = None
@@ -416,10 +412,6 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             merged_names.extend(name for name, _ in grouped_sources)
         return merged_names
-
-    def _viewer_public_url(self) -> str:
-        host = self.headers.get("Host", "").split(":")[0] or "127.0.0.1"
-        return f"http://{host}:{GLOBAL_VIEWER_PORT}/"
 
     def _ensure_global_harbor_viewer(self, jobs_dir: str | None = None, *, run_id: str | None = None) -> dict[str, object]:
         harbor_repo, jobs_path = resolve_global_harbor_viewer_paths(jobs_dir)
