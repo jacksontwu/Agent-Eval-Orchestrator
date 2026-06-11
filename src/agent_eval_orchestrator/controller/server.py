@@ -444,20 +444,28 @@ class Handler(BaseHTTPRequestHandler):
                 "harborRepo": str(harbor_repo),
             }
 
+        return Handler._external_harbor_viewer_response(self, jobs_dir=jobs_path, harbor_repo=harbor_repo)
+
+    def _external_harbor_viewer_response(
+        self,
+        *,
+        jobs_dir: Path,
+        harbor_repo: Path,
+    ) -> dict[str, object]:
         try:
             viewer_url = resolve_external_harbor_viewer_url()
         except RuntimeError as exc:
             return {
                 "available": False,
                 "reason": str(exc),
-                "jobsDir": str(jobs_path),
+                "jobsDir": str(jobs_dir),
                 "harborRepo": str(harbor_repo),
             }
         if not viewer_url:
             return {
                 "available": False,
                 "reason": "Harbor Viewer 未配置，请设置 AEO_HARBOR_VIEWER_URL 并手动启动 harbor view",
-                "jobsDir": str(jobs_path),
+                "jobsDir": str(jobs_dir),
                 "harborRepo": str(harbor_repo),
             }
 
@@ -467,14 +475,14 @@ class Handler(BaseHTTPRequestHandler):
                     "available": True,
                     "url": viewer_url,
                     "embeddedUrl": viewer_url,
-                    "jobsDir": str(jobs_path),
+                    "jobsDir": str(jobs_dir),
                     "harborRepo": str(harbor_repo),
                 }
         except Exception as exc:
             return {
                 "available": False,
                 "reason": f"Harbor Viewer 不可用: {viewer_url} ({exc})",
-                "jobsDir": str(jobs_path),
+                "jobsDir": str(jobs_dir),
                 "harborRepo": str(harbor_repo),
             }
 
@@ -1492,20 +1500,13 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             jobs_dir = local_job_dir.parent
-            viewer_id = batch_id
-            try:
-                session = self.viewer_manager.ensure_viewer(viewer_id=viewer_id, jobs_dir=jobs_dir)
-            except Exception as exc:
-                _json_response(self, {"available": False, "reason": str(exc)}, 500)
-                return
+            normalize_jobs_dir(jobs_dir)
             _json_response(
                 self,
-                {
-                    "available": True,
-                    "viewerId": viewer_id,
-                    "embeddedUrl": f"/harbor-viewer/{viewer_id}/",
-                    "upstreamPort": session.port,
-                },
+                self._external_harbor_viewer_response(
+                    jobs_dir=jobs_dir,
+                    harbor_repo=resolve_controller_viewer_harbor_repo(),
+                ),
             )
             return
         if path == "/api/workers/claim":

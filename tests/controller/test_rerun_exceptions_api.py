@@ -871,6 +871,59 @@ def test_job_archive_import_skips_absolute_symlink_members(store, tmp_path):
     server.shutdown()
 
 
+def test_batch_viewer_returns_external_viewer_without_starting_process(store, tmp_path, monkeypatch):
+    run, batch = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "case-a", "status": "failed", "score": 0.0}],
+    )
+    jobs_dir = tmp_path / "harbor" / "jobs"
+    job_dir = jobs_dir / sanitize_name(str(run["display_name"]))
+    _write_jobs_trial(job_dir, "case-a__new", task_name="case-a")
+    store.update_batch_progress(
+        batch_id=batch["batch_id"],
+        worker_id="worker-a",
+        status="succeeded",
+        current_step="completed",
+        finished=True,
+        artifact_index={"jobDir": str(job_dir)},
+    )
+    monkeypatch.setenv("AEO_HARBOR_VIEWER_URL", "http://viewer.example.test:7369")
+
+    class HealthyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "agent_eval_orchestrator.controller.server.request.urlopen",
+        lambda url, timeout: HealthyResponse(),
+    )
+
+    class FailingViewerManager:
+        def ensure_viewer(self, *, viewer_id, jobs_dir):
+            raise AssertionError("batch viewer endpoint must not start Harbor Viewer")
+
+    server = start_test_server(store, tmp_path, 9908)
+    Handler.viewer_manager = FailingViewerManager()
+    conn = HTTPConnection("127.0.0.1", 9908)
+    conn.request(
+        "POST",
+        f"/api/batches/{batch['batch_id']}/viewer",
+        body="{}",
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+
+    assert resp.status == 200
+    assert payload["available"] is True
+    assert payload["url"] == "http://viewer.example.test:7369/"
+    assert payload["embeddedUrl"] == "http://viewer.example.test:7369/"
+    server.shutdown()
+
+
 def test_rebuild_merged_jobs_limits_runs_to_requested_jobs_dir(store, tmp_path):
     run_a, batch_a = seed_finished_run_with_cases(
         store,
