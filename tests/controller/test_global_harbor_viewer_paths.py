@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 from agent_eval_orchestrator.controller import server
 from agent_eval_orchestrator.controller.server import Handler
@@ -78,6 +79,26 @@ def test_global_harbor_viewer_returns_configured_external_url(tmp_path, monkeypa
     assert result["embeddedUrl"] == "http://viewer.example.test:7369/"
     assert result["jobsDir"] == str(jobs_dir.resolve())
     assert seen_urls == ["http://viewer.example.test:7369/api/health"]
+
+
+def test_global_harbor_viewer_accepts_basic_auth_health_challenge(tmp_path, monkeypatch) -> None:
+    jobs_dir = tmp_path / "jobs"
+    jobs_dir.mkdir()
+    monkeypatch.setenv("AEO_HARBOR_VIEWER_URL", "http://viewer.example.test:7369")
+
+    def fake_urlopen(url, timeout):
+        raise HTTPError(url=url, code=401, msg="Unauthorized", hdrs={}, fp=None)
+
+    monkeypatch.setattr(server.request, "urlopen", fake_urlopen)
+    handler = SimpleNamespace(
+        _rebuild_merged_jobs=lambda jobs_dir, run_id=None: None,
+    )
+
+    result = Handler._ensure_global_harbor_viewer(handler, str(jobs_dir))
+
+    assert result["available"] is True
+    assert result["url"] == "http://viewer.example.test:7369/"
+    assert result["embeddedUrl"] == "http://viewer.example.test:7369/"
 
 
 def test_global_harbor_viewer_reports_unhealthy_external_url(tmp_path, monkeypatch) -> None:

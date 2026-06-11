@@ -461,15 +461,25 @@ class Handler(BaseHTTPRequestHandler):
                 "harborRepo": str(harbor_repo),
             }
 
+        available_response = {
+            "available": True,
+            "url": viewer_url,
+            "embeddedUrl": viewer_url,
+            "jobsDir": str(jobs_dir),
+            "harborRepo": str(harbor_repo),
+        }
         try:
             with request.urlopen(external_harbor_viewer_health_url(viewer_url), timeout=1):
-                return {
-                    "available": True,
-                    "url": viewer_url,
-                    "embeddedUrl": viewer_url,
-                    "jobsDir": str(jobs_dir),
-                    "harborRepo": str(harbor_repo),
-                }
+                return available_response
+        except error.HTTPError as exc:
+            if exc.code == 401:
+                return available_response
+            return {
+                "available": False,
+                "reason": f"Harbor Viewer 不可用: {viewer_url} ({exc})",
+                "jobsDir": str(jobs_dir),
+                "harborRepo": str(harbor_repo),
+            }
         except Exception as exc:
             return {
                 "available": False,
