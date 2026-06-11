@@ -824,6 +824,53 @@ def test_job_archive_imports_primary_job_archive_by_batch_id(store, tmp_path):
     server.shutdown()
 
 
+def test_job_archive_import_skips_absolute_symlink_members(store, tmp_path):
+    run, batch = seed_finished_run_with_cases(
+        store,
+        cases=[{"case_id": "case-a", "status": "failed", "score": 0.0}],
+    )
+    jobs_dir = tmp_path / "harbor" / "jobs"
+    store.update_task_template_executor_config(
+        str(run["template_id"]),
+        {"combinedJobsDir": str(jobs_dir)},
+    )
+
+    archive_root = tmp_path / "archive"
+    archived_job_dir = archive_root / "worker-job-name"
+    trial_dir = _write_jobs_trial(archived_job_dir, "case-a__new", task_name="case-a")
+    (archived_job_dir / "config.json").write_text(
+        json.dumps({"job_name": archived_job_dir.name, "jobs_dir": str(archive_root)}),
+        encoding="utf-8",
+    )
+    absolute_link = trial_dir / "agent" / ".cac" / "debug" / "latest"
+    absolute_link.parent.mkdir(parents=True)
+    os.symlink("/tmp/agent-debug-latest", absolute_link)
+
+    server = start_test_server(store, tmp_path, 9907)
+    conn = HTTPConnection("127.0.0.1", 9907)
+    body = json.dumps(
+        {
+            "batchId": batch["batch_id"],
+            "jobsDir": str(jobs_dir),
+            "archiveBase64": _tar_dir_base64(archived_job_dir),
+        }
+    )
+    with patch("agent_eval_orchestrator.normalizers.harbor_job_merge.finalize_job_result_with_harbor"):
+        conn.request(
+            "POST",
+            "/api/workers/job-archive",
+            body=body,
+            headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+        )
+        resp = conn.getresponse()
+
+    assert resp.status == 200
+    imported_job_dir = store.layout.controller_dir / "imported-jobs" / batch["batch_id"]
+    assert (imported_job_dir / "case-a__new" / "result.json").exists()
+    assert not (imported_job_dir / "case-a__new" / "agent" / ".cac" / "debug" / "latest").exists()
+    server.shutdown()
+
+
 def test_rebuild_merged_jobs_limits_runs_to_requested_jobs_dir(store, tmp_path):
     run_a, batch_a = seed_finished_run_with_cases(
         store,

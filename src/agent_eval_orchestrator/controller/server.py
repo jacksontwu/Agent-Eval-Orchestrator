@@ -97,11 +97,23 @@ def _is_subpath(path: Path, root: Path) -> bool:
 def _safe_extract_tar(archive: bytes, target_dir: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        safe_members: list[tarfile.TarInfo] = []
         for member in tar.getmembers():
             target = (target_dir / member.name).resolve()
             if not _is_subpath(target, target_dir):
                 raise RuntimeError(f"unsafe tar member: {member.name}")
-        tar.extractall(target_dir)
+            if member.issym():
+                link_target = (target.parent / member.linkname).resolve()
+                if os.path.isabs(member.linkname) or not _is_subpath(link_target, target_dir):
+                    continue
+            elif member.islnk():
+                link_target = (target_dir / member.linkname).resolve()
+                if os.path.isabs(member.linkname) or not _is_subpath(link_target, target_dir):
+                    continue
+            elif not (member.isdir() or member.isfile()):
+                continue
+            safe_members.append(member)
+        tar.extractall(target_dir, members=safe_members, filter="fully_trusted")
 
 
 def _run_rerun_job_dto(job: dict[str, object]) -> dict[str, object]:
