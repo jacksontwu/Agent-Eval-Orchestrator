@@ -454,7 +454,6 @@ INDEX_HTML = """<!doctype html>
         <p>页面版本 2026-05-21-1 · timeout 配置、磁盘保护与失败占位状态已更新</p>
       </div>
       <div class="header-actions">
-        <a class="primary" id="openCreateBtn" href="/create">创建分布式任务</a>
         <div class="subtle" id="updatedAt">加载中</div>
       </div>
     </div>
@@ -469,6 +468,7 @@ INDEX_HTML = """<!doctype html>
     <div class="tabs">
       <button class="tab active" data-tab="tasks">Tasks</button>
       <button class="tab" data-tab="workers">Workers</button>
+      <button class="tab" data-tab="create">Submit</button>
     </div>
 
     <section id="tasksView">
