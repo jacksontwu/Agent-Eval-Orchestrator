@@ -3,9 +3,17 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+import pytest
 import yaml
 
 from agent_eval_orchestrator.executors.harbor import HarborExecutor
+
+
+def _make_executable(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
 
 
 def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
@@ -17,6 +25,8 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
 
     harbor_repo = tmp_path / "harbor"
     harbor_repo.mkdir()
+    uv = _make_executable(tmp_path / "uv")
+    bitfun_cli = _make_executable(tmp_path / "bitfun-cli")
 
     prepared = HarborExecutor().prepare(
         batch={
@@ -39,10 +49,10 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
             "verifierTimeoutMultiplier": 2.0,
             "environmentBuildTimeoutMultiplier": 1.5,
             "mounts": [
-                {"type": "bind", "source": "/home/djn/.local/bin/uv", "target": "/usr/local/bin/uv", "read_only": True},
+                {"type": "bind", "source": str(uv), "target": "/usr/local/bin/uv", "read_only": True},
                 {
                     "type": "bind",
-                    "source": "/home/djn/worker/harbor/BitFun/target/release/bitfun-cli",
+                    "source": str(bitfun_cli),
                     "target": "/usr/local/bin/bitfun-cli",
                     "read_only": True,
                 },
@@ -67,6 +77,50 @@ def test_prepare_includes_retry_and_environment_flags(tmp_path: Path) -> None:
     assert "--verifier-timeout-multiplier 2.0" in shell
     assert "--environment-build-timeout-multiplier 1.5" in shell
     assert "/root/.config/bitfun" in shell
+
+
+def test_prepare_rejects_bitfun_cli_mount_source_that_is_not_a_file(tmp_path: Path) -> None:
+    batch_root = tmp_path / "batch-root"
+    batch_root.mkdir()
+    dataset = tmp_path / "dataset" / "case-a"
+    dataset.mkdir(parents=True)
+    (dataset / "task.toml").write_text("", encoding="utf-8")
+
+    harbor_repo = tmp_path / "harbor"
+    harbor_repo.mkdir()
+    bad_bitfun_cli = tmp_path / "bitfun-cli"
+    bad_bitfun_cli.mkdir()
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"mount source for /usr/local/bin/bitfun-cli must be an executable file: {bad_bitfun_cli}",
+    ):
+        HarborExecutor().prepare(
+            batch={
+                "batch_id": "batch-test",
+                "batch_root": str(batch_root),
+                "selected_case_ids": ["case-a"],
+            },
+            run={},
+            template={},
+            dataset_ref=str(dataset.parent),
+            executor_config={
+                "agentName": "bitfun-cli",
+                "envType": "docker",
+                "nConcurrent": 1,
+                "mounts": [
+                    {
+                        "type": "bind",
+                        "source": str(bad_bitfun_cli),
+                        "target": "/usr/local/bin/bitfun-cli",
+                        "read_only": True,
+                    },
+                ],
+                "harborRepoPath": str(harbor_repo),
+            },
+            local_root=tmp_path / "local",
+            shared_root=None,
+        )
 
 
 def test_prepare_includes_model_agent_env_and_agent_kwargs(tmp_path: Path) -> None:

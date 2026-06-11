@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 from pathlib import Path
@@ -20,6 +21,9 @@ from agent_eval_orchestrator.core.worker_paths import resolve_harbor_repo, resol
 from agent_eval_orchestrator.executors.base import CollectedArtifacts, Executor, PreparedBatch
 
 
+BITFUN_CLI_CONTAINER_PATH = "/usr/local/bin/bitfun-cli"
+
+
 def _copy_selected_tasks(dataset_path: Path, selected_case_ids: list[str], target_root: Path) -> Path:
     target_root.mkdir(parents=True, exist_ok=True)
     for case_id in selected_case_ids:
@@ -28,6 +32,19 @@ def _copy_selected_tasks(dataset_path: Path, selected_case_ids: list[str], targe
             raise RuntimeError(f"selected case path not found: {source_dir}")
         shutil.copytree(source_dir, target_root / case_id, dirs_exist_ok=True)
     return target_root
+
+
+def _validate_bitfun_cli_mount(mounts: Any) -> None:
+    if not isinstance(mounts, list):
+        return
+    for mount in mounts:
+        if not isinstance(mount, dict) or mount.get("target") != BITFUN_CLI_CONTAINER_PATH:
+            continue
+        source = Path(str(mount.get("source") or "")).expanduser()
+        if not source.is_file() or not os.access(source, os.X_OK):
+            raise RuntimeError(
+                f"mount source for {BITFUN_CLI_CONTAINER_PATH} must be an executable file: {source}"
+            )
 
 
 class HarborExecutor(Executor):
@@ -269,6 +286,7 @@ class HarborExecutor(Executor):
         harbor_args.append("--delete" if delete_environment else "--no-delete")
         mounts = self._resolve_worker_override(executor_config, worker_id, "mounts", None)
         if mounts:
+            _validate_bitfun_cli_mount(mounts)
             harbor_args.extend(["--mounts", json.dumps(mounts, ensure_ascii=False)])
         for extra_arg in executor_config.get("extraArgs") or []:
             harbor_args.append(str(extra_arg))

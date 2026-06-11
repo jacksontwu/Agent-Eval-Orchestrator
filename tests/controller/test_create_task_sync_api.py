@@ -222,6 +222,74 @@ datasets:
         )
 
 
+def test_create_task_yaml_first_syncs_bitfun_mounts_and_rewrites_worker_yaml(store, tmp_path, monkeypatch):
+    dataset = tmp_path / "tasks"
+    harbor_repo = tmp_path / "harbor"
+    monkeypatch.setattr(controller_server, "resolve_controller_viewer_harbor_repo", lambda: harbor_repo)
+    case_dir = dataset / "alpha"
+    case_dir.mkdir(parents=True)
+    (case_dir / "task.toml").write_text("", encoding="utf-8")
+    bitfun_cli = tmp_path / "bitfun-cli"
+    bitfun_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(bitfun_cli, 0o755)
+    bitfun_config = tmp_path / "bitfun-config"
+    (bitfun_config / "config").mkdir(parents=True)
+    (bitfun_config / "config" / "app.json").write_text("{}", encoding="utf-8")
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local-a",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(tmp_path / "runtime-a"), "localToController": True},
+    )
+    server = start_test_server(store, tmp_path, 9887)
+    conn = HTTPConnection("127.0.0.1", 9887)
+    body = json.dumps(
+        {
+            "harborYaml": f"""
+agents:
+  - name: bitfun-cli
+datasets:
+  - path: {dataset}
+    task_names:
+      - alpha
+environment:
+  type: docker
+  mounts:
+    - type: bind
+      source: {bitfun_cli}
+      target: /usr/local/bin/bitfun-cli
+      read_only: true
+    - type: bind
+      source: {bitfun_config}
+      target: /root/.config/bitfun
+""",
+            "workerIds": ["local-a"],
+        }
+    )
+    conn.request(
+        "POST",
+        "/api/eval-tasks/create-and-distribute",
+        body=body,
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 201
+    manifest = payload["run"]["sync_manifest"]
+    assert manifest["bitfunCliPath"] == str(bitfun_cli.resolve())
+    assert manifest["bitfunConfigDir"] == str(bitfun_config.resolve())
+    batch = payload["batches"][0]
+    batch_yaml = yaml.safe_load(payload["template"]["executor_config"]["harborYamlByBatchId"][batch["batch_id"]])
+    mounts = batch_yaml["environment"]["mounts"]
+    assert mounts[0]["source"] == str(tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "bitfun" / "bitfun-cli")
+    assert mounts[1]["source"] == str(tmp_path / "runtime-a" / "sync" / payload["run"]["run_id"] / "bitfun" / "config")
+    assert mounts[1]["target"] == "/root/.config/bitfun/config"
+
+
 def test_create_task_yaml_first_defaults_combined_jobs_dir_to_harbor_jobs(store, tmp_path, monkeypatch):
     dataset = tmp_path / "tasks"
     harbor_repo = tmp_path / "harbor"

@@ -14,6 +14,11 @@ class HarborYamlError(ValueError):
     """Raised when submitted Harbor YAML cannot be distributed by AEO."""
 
 
+BITFUN_CLI_TARGET = "/usr/local/bin/bitfun-cli"
+BITFUN_CONFIG_TARGET = "/root/.config/bitfun"
+BITFUN_CONFIG_DIR_TARGET = "/root/.config/bitfun/config"
+
+
 @dataclass(frozen=True)
 class HarborYamlPlan:
     original_yaml: str
@@ -70,6 +75,7 @@ def build_batch_harbor_yaml(
     selected_task_ids: list[str],
     jobs_dir: str,
     worker_dataset_path: str | None = None,
+    worker_sync_root: str | None = None,
 ) -> str:
     if not selected_task_ids:
         raise HarborYamlError(f"batch {batch_id} has no selected task ids")
@@ -95,7 +101,51 @@ def build_batch_harbor_yaml(
                 task["path"] = str(Path(worker_dataset_path) / task_id)
             tasks.append(task)
         payload["tasks"] = tasks
+    if worker_sync_root:
+        _rewrite_bitfun_mounts(payload, worker_sync_root=worker_sync_root)
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+
+
+def extract_bitfun_mount_paths(config: dict[str, Any]) -> tuple[Path | None, Path | None]:
+    mounts = _environment_mounts(config)
+    bitfun_cli_path: Path | None = None
+    bitfun_config_dir: Path | None = None
+    for mount in mounts:
+        target = _normalized_target(mount)
+        source = Path(str(mount.get("source") or "")).expanduser()
+        if target == BITFUN_CLI_TARGET:
+            bitfun_cli_path = source.resolve()
+        elif target == BITFUN_CONFIG_TARGET:
+            bitfun_config_dir = source.resolve()
+        elif target == BITFUN_CONFIG_DIR_TARGET:
+            resolved = source.resolve()
+            bitfun_config_dir = resolved.parent if resolved.name == "config" else resolved
+    return bitfun_cli_path, bitfun_config_dir
+
+
+def _environment_mounts(config: dict[str, Any]) -> list[dict[str, Any]]:
+    environment = config.get("environment")
+    if not isinstance(environment, dict):
+        return []
+    mounts = environment.get("mounts")
+    if not isinstance(mounts, list):
+        return []
+    return [mount for mount in mounts if isinstance(mount, dict)]
+
+
+def _normalized_target(mount: dict[str, Any]) -> str:
+    return str(mount.get("target") or "").rstrip("/")
+
+
+def _rewrite_bitfun_mounts(config: dict[str, Any], *, worker_sync_root: str) -> None:
+    root = str(Path(worker_sync_root))
+    for mount in _environment_mounts(config):
+        target = _normalized_target(mount)
+        if target == BITFUN_CLI_TARGET:
+            mount["source"] = f"{root}/bitfun/bitfun-cli"
+        elif target in (BITFUN_CONFIG_TARGET, BITFUN_CONFIG_DIR_TARGET):
+            mount["source"] = f"{root}/bitfun/config"
+            mount["target"] = BITFUN_CONFIG_DIR_TARGET
 
 
 def _resolve_dataset_tasks(config: dict[str, Any]) -> tuple[str, list[str], dict[str, dict[str, Any]]]:

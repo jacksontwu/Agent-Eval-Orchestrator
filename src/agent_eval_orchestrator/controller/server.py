@@ -37,6 +37,7 @@ from agent_eval_orchestrator.controller.executor_config import build_asset_sync_
 from agent_eval_orchestrator.controller.harbor_yaml import (
     HarborYamlError,
     build_batch_harbor_yaml,
+    extract_bitfun_mount_paths,
     parse_harbor_yaml,
 )
 from agent_eval_orchestrator.controller.harbor_viewer import HarborViewerManager
@@ -858,6 +859,20 @@ class Handler(BaseHTTPRequestHandler):
                 controller_shared_root=controller_root,
                 task_sources=task_sources,
             )
+            bitfun_cli_path, bitfun_config_dir = extract_bitfun_mount_paths(plan.original_config)
+            if bitfun_cli_path is not None or bitfun_config_dir is not None:
+                if bitfun_cli_path is None or not bitfun_cli_path.is_file() or not os.access(bitfun_cli_path, os.X_OK):
+                    raise HarborYamlError(
+                        f"bitfun-cli mount source must be an executable file: {bitfun_cli_path}"
+                    )
+                if bitfun_config_dir is None or not bitfun_config_dir.is_dir():
+                    raise HarborYamlError(
+                        f"bitfun config mount source must be an existing directory: {bitfun_config_dir}"
+                    )
+                if not (bitfun_config_dir / "config").is_dir():
+                    raise HarborYamlError(
+                        f"bitfun config mount source must contain a config directory: {bitfun_config_dir / 'config'}"
+                    )
             template = self.store.create_task_template(
                 owner=DEFAULT_OWNER,
                 name=plan.generated_job_name,
@@ -896,6 +911,8 @@ class Handler(BaseHTTPRequestHandler):
                 worker_shards=worker_shards,
                 workers_by_id=workers_by_id,
                 controller_shared_root=controller_root,
+                bitfun_cli_path=bitfun_cli_path,
+                bitfun_config_dir=bitfun_config_dir,
                 task_sources=task_sources,
             )
             yaml_by_batch_id = {}
@@ -903,13 +920,15 @@ class Handler(BaseHTTPRequestHandler):
             for batch in batches:
                 jobs_dir = Path(str(batch["batch_root"])) / "harbor" / "jobs"
                 worker_id = str(batch["preferred_worker_id"])
-                worker_dataset_path = str(Path(str(manifest["workers"][worker_id]["targetRoot"])) / "dataset")
+                worker_sync_root = str(manifest["workers"][worker_id]["targetRoot"])
+                worker_dataset_path = str(Path(worker_sync_root) / "dataset")
                 yaml_by_batch_id[str(batch["batch_id"])] = build_batch_harbor_yaml(
                     plan,
                     batch_id=str(batch["batch_id"]),
                     selected_task_ids=[str(item) for item in batch.get("selected_case_ids") or []],
                     jobs_dir=str(jobs_dir),
                     worker_dataset_path=worker_dataset_path,
+                    worker_sync_root=worker_sync_root,
                 )
             template = self.store.update_task_template_executor_config(
                 str(template["template_id"]),
@@ -929,7 +948,10 @@ class Handler(BaseHTTPRequestHandler):
             self.store.create_asset_sync_job(
                 job_id=sync_job_id,
                 run_id=str(run["run_id"]),
-                steps=initial_worker_steps(worker_ids, include_bitfun=False),
+                steps=initial_worker_steps(
+                    worker_ids,
+                    include_bitfun=bitfun_cli_path is not None and bitfun_config_dir is not None,
+                ),
             )
             if self.asset_syncer is not None:
                 self.asset_syncer.start_job_async(
