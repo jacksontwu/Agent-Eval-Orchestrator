@@ -315,12 +315,21 @@ INDEX_HTML = """<!doctype html>
       padding: 0;
       text-decoration: underline;
     }
-    .primary, .ghost {
+    .primary, .ghost, .secondary, .danger {
+      min-height: 38px;
       border-radius: 8px;
-      padding: 8px 12px;
+      padding: 8px 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-weight: 600;
+      line-height: 1.2;
+      white-space: nowrap;
       cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease;
     }
-    a.primary, a.ghost {
+    a.primary, a.ghost, a.secondary, a.danger {
       text-decoration: none;
       display: inline-flex;
       align-items: center;
@@ -331,17 +340,31 @@ INDEX_HTML = """<!doctype html>
       background: var(--accent);
       color: white;
     }
-    .ghost {
+    .primary:hover:not(:disabled) {
+      background: #0f63b7;
+    }
+    .ghost, .secondary {
       border: 1px solid var(--border);
       background: white;
       color: var(--fg);
+    }
+    .ghost:hover:not(:disabled), .secondary:hover:not(:disabled) {
+      border-color: #bfd0df;
+      background: #f8fafc;
     }
     .danger {
       background: var(--bad);
       color: #fff;
       border: 1px solid var(--bad);
     }
-    .danger:disabled {
+    .danger:hover:not(:disabled) {
+      background: #9f1c1c;
+      border-color: #9f1c1c;
+    }
+    .primary:disabled, .ghost:disabled, .secondary:disabled, .danger:disabled {
+      background: #f1f5f9;
+      border: 1px solid #d7e0ea;
+      color: #9aa7b5;
       opacity: 0.45;
       cursor: not-allowed;
     }
