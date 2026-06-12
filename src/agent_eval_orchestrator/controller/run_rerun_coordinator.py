@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from agent_eval_orchestrator.controller.asset_syncer import build_sync_manifest, validate_create_task_assets
+from agent_eval_orchestrator.controller.asset_syncer import (
+    build_sync_manifest,
+    validate_create_task_assets,
+    validate_dataset_assets,
+)
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
 from agent_eval_orchestrator.controller.harbor_exceptions import (
     exception_type_from_text,
     harbor_trial_case_id,
+)
+from agent_eval_orchestrator.controller.harbor_yaml import (
+    HarborYamlPlan,
+    build_batch_harbor_yaml,
+    discover_bind_assets,
+    parse_rerun_harbor_yaml,
 )
 from agent_eval_orchestrator.controller.rerun_artifacts import (
     copy_harbor_job,
@@ -73,7 +83,11 @@ class RunRerunCoordinator:
         selected_error_types = scope.selected_error_types
         asset_config = self._filter_config_for_assets(dict(config or {}))
         config_supplied = self._has_applicable_config(asset_config)
-        if config_supplied:
+        harbor_yaml_plan = self._parse_harbor_yaml_config(
+            config=config,
+            selected_task_ids=all_case_ids,
+        )
+        if harbor_yaml_plan is None and config_supplied:
             self._prevalidate_config(
                 config=dict(asset_config or {}),
                 template=source_template,
@@ -127,7 +141,7 @@ class RunRerunCoordinator:
                     rerun_job_id=job_id,
                 )
             rerun_concurrency: int | None = None
-            if config_supplied:
+            if harbor_yaml_plan is None and config_supplied:
                 rerun_concurrency = self._apply_config(
                     run=derived_run,
                     config=dict(asset_config or {}),
@@ -135,7 +149,7 @@ class RunRerunCoordinator:
                     worker_shards=worker_shards,
                     all_case_ids=all_case_ids,
                 )
-            else:
+            elif harbor_yaml_plan is None:
                 self._set_derived_template_jobs_dir(run=derived_run, source_template=source_template)
             self._copy_and_prune_source_jobs(
                 source_template=source_template,
@@ -148,6 +162,7 @@ class RunRerunCoordinator:
                 target_run_id=str(derived_run["run_id"]),
             )
             rerun_batches: dict[str, str | list[str]] = {}
+            rerun_batch_case_ids: dict[str, list[str]] = {}
             for worker_id, items in grouped.items():
                 batches_for_worker: list[str] = []
                 by_parent: dict[str, list[str]] = {}
@@ -168,11 +183,19 @@ class RunRerunCoordinator:
                         batch_kind="exception_rerun",
                         parent_batch_id=parent_batch_id,
                     )
+                    rerun_batch_case_ids[str(batch["batch_id"])] = list(case_ids)
                     batches_for_worker.append(str(batch["batch_id"]))
                 rerun_batches[worker_id] = (
                     batches_for_worker[0] if len(batches_for_worker) == 1 else batches_for_worker
                 )
 
+            if harbor_yaml_plan is not None:
+                self._apply_harbor_yaml_config(
+                    run=derived_run,
+                    plan=harbor_yaml_plan,
+                    worker_shards=worker_shards,
+                    rerun_batch_case_ids=rerun_batch_case_ids,
+                )
             self.store.update_run_rerun_job(
                 job_id,
                 rerun_batches=rerun_batches,
@@ -591,6 +614,20 @@ class RunRerunCoordinator:
                 return True
         return False
 
+    def _parse_harbor_yaml_config(
+        self,
+        *,
+        config: dict[str, Any] | None,
+        selected_task_ids: list[str],
+    ) -> HarborYamlPlan | None:
+        if not isinstance(config, dict) or "harborYaml" not in config:
+            return None
+        raw_yaml = str(config.get("harborYaml") or "").strip()
+        try:
+            return parse_rerun_harbor_yaml(raw_yaml, selected_task_ids=selected_task_ids)
+        except ValueError as exc:
+            raise RerunValidationError(400, str(exc)) from exc
+
     def _prevalidate_config(
         self,
         *,
@@ -803,6 +840,92 @@ class RunRerunCoordinator:
             sync_manifest=manifest,
         )
         return int(executor_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY)
+
+    def _apply_harbor_yaml_config(
+        self,
+        *,
+        run: dict[str, Any],
+        plan: HarborYamlPlan,
+        worker_shards: dict[str, list[str]],
+        rerun_batch_case_ids: dict[str, list[str]],
+    ) -> None:
+        template = self.store.get_task_template(str(run["template_id"]))
+        if not template:
+            raise RerunValidationError(404, "task template not found")
+        controller_root = (
+            self.asset_syncer.controller_shared_root
+            if self.asset_syncer is not None
+            else self.store.layout.root
+        )
+        workers = self.store.list_workers()
+        workers_by_id = {str(item["worker_id"]): item for item in workers}
+        worker_ids = list(worker_shards.keys())
+        task_sources = (
+            {task_id: str(task["path"]) for task_id, task in plan.tasks_by_id.items()}
+            if plan.mode == "tasks"
+            else None
+        )
+        try:
+            bind_assets = discover_bind_assets(plan.original_config)
+            validate_dataset_assets(
+                dataset_path=Path(plan.dataset_ref),
+                case_ids=plan.task_ids,
+                workers=workers,
+                worker_ids=worker_ids,
+                controller_shared_root=controller_root,
+                task_sources=task_sources,
+            )
+            manifest = build_sync_manifest(
+                run_id=str(run["run_id"]),
+                dataset_path=Path(plan.dataset_ref),
+                worker_shards=worker_shards,
+                workers_by_id=workers_by_id,
+                controller_shared_root=controller_root,
+                bind_assets=bind_assets,
+                task_sources=task_sources,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise RerunValidationError(400, str(exc)) from exc
+        runtime_job_name = sanitize_name(str(run["display_name"]))
+        runtime_plan = replace(plan, generated_job_name=runtime_job_name)
+        yaml_by_batch_id: dict[str, str] = {}
+        for batch_id, case_ids in rerun_batch_case_ids.items():
+            batch = self.store.get_batch(batch_id)
+            if not batch:
+                raise RerunValidationError(404, f"rerun batch not found: {batch_id}")
+            worker_id = str(batch.get("preferred_worker_id") or batch.get("assigned_worker_id") or "")
+            worker_sync_root = str(manifest["workers"][worker_id]["targetRoot"])
+            worker_dataset_path = str(Path(worker_sync_root) / "dataset")
+            try:
+                yaml_by_batch_id[batch_id] = build_batch_harbor_yaml(
+                    runtime_plan,
+                    batch_id=batch_id,
+                    selected_task_ids=case_ids,
+                    jobs_dir=str(Path(str(batch["batch_root"])) / "harbor" / "jobs"),
+                    worker_dataset_path=worker_dataset_path,
+                    worker_sync_root=worker_sync_root,
+                    bind_assets=bind_assets,
+                )
+            except ValueError as exc:
+                raise RerunValidationError(400, str(exc)) from exc
+        self.store.update_task_template_executor_config(
+            str(template["template_id"]),
+            {
+                "harborYaml": plan.original_yaml,
+                "harborYamlMode": plan.mode,
+                "harborYamlTaskIds": plan.task_ids,
+                "harborYamlGeneratedJobName": runtime_job_name,
+                "harborYamlByBatchId": yaml_by_batch_id,
+                "collectJobs": True,
+                "combinedJobsDir": str(derived_jobs_dir_for_run(store=self.store, run=run)),
+            },
+            replace_keys={"harborYamlByBatchId"},
+        )
+        self.store.update_task_template_dataset_ref(str(template["template_id"]), plan.dataset_ref)
+        self.store.update_run_sync_fields(
+            run_id=str(run["run_id"]),
+            sync_manifest=manifest,
+        )
 
     def _set_derived_template_jobs_dir(
         self,

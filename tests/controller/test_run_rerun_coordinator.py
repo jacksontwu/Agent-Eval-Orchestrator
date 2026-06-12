@@ -182,6 +182,132 @@ def test_preview_harbor_yaml_generates_legacy_yaml(store, tmp_path):
     assert payload["datasets"][0]["task_names"] == ["exc-a", "ok"]
 
 
+def test_start_rerun_harbor_yaml_ignores_submitted_task_names_and_writes_batch_yaml(store, tmp_path):
+    dataset = _make_dataset(tmp_path, ["exc-a", "exc-b", "ok"])
+    _make_worker_local(store, tmp_path)
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "stderr"}},
+            {"case_id": "exc-b", "status": "errored", "error_text": "timeout", "metrics": {"errorType": "AgentTimeoutError"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    store.update_task_template_dataset_ref(run["template_id"], str(dataset))
+    submitted_yaml = f"""
+job_name: user-edited-job
+jobs_dir: user-jobs
+n_concurrent_trials: 9
+agents:
+  - name: codex
+    model_name: openai/gpt-4o
+datasets:
+  - path: {dataset}
+    task_names:
+      - ok
+"""
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(
+        run["run_id"],
+        config={"selectedErrorTypes": ["stderr"], "harborYaml": submitted_yaml},
+    )
+
+    derived_run = store.get_run(result["runId"])
+    derived_template = store.get_task_template(derived_run["template_id"])
+    executor_config = derived_template["executor_config"]
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    batch_yaml = yaml.safe_load(executor_config["harborYamlByBatchId"][rerun_batch["batch_id"]])
+
+    assert result["exceptionCount"] == 1
+    assert rerun_batch["selected_case_ids"] == ["exc-a"]
+    assert executor_config["harborYaml"] == submitted_yaml.strip()
+    assert executor_config["harborYamlMode"] == "datasets"
+    assert executor_config["harborYamlTaskIds"] == ["exc-a"]
+    assert executor_config["harborYamlGeneratedJobName"] == sanitize_name(derived_run["display_name"])
+    assert executor_config["combinedJobsDir"] == str(derived_jobs_dir_for_run(store=store, run=derived_run))
+    assert batch_yaml["n_concurrent_trials"] == 9
+    assert batch_yaml["agents"][0]["name"] == "codex"
+    assert batch_yaml["datasets"][0]["task_names"] == ["exc-a"]
+    assert batch_yaml["job_name"] == sanitize_name(derived_run["display_name"])
+    assert batch_yaml["jobs_dir"] == str(Path(rerun_batch["batch_root"]) / "harbor" / "jobs")
+
+
+def test_start_rerun_harbor_yaml_rejects_changed_dataset_missing_selected_case(store, tmp_path):
+    source_dataset = _make_dataset(tmp_path / "source", ["exc-a", "ok"])
+    target_dataset = _make_dataset(tmp_path / "target", ["ok"])
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "stderr"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    store.update_task_template_dataset_ref(run["template_id"], str(source_dataset))
+    submitted_yaml = f"""
+agents:
+  - name: codex
+datasets:
+  - path: {target_dataset}
+    task_names:
+      - ok
+"""
+
+    with pytest.raises(RerunValidationError) as exc:
+        RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(
+            run["run_id"],
+            config={"selectedErrorTypes": ["stderr"], "harborYaml": submitted_yaml},
+        )
+
+    assert exc.value.code == 400
+    assert exc.value.message == "case directory not found: exc-a"
+    assert _derived_runs_for_parent(store, run["run_id"]) == []
+
+
+def test_start_rerun_harbor_yaml_manifest_includes_bind_assets(store, tmp_path):
+    dataset = _make_dataset(tmp_path, ["exc-a", "ok"])
+    codeagent = tmp_path / "codeagentcli"
+    codeagent.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(codeagent, 0o755)
+    _make_worker_local(store, tmp_path)
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "stderr"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    store.update_task_template_dataset_ref(run["template_id"], str(dataset))
+    submitted_yaml = f"""
+agents:
+  - name: codeagent
+    kwargs:
+      binary_path: {codeagent}
+datasets:
+  - path: {dataset}
+    task_names:
+      - ok
+environment:
+  type: docker
+  mounts:
+    - type: bind
+      source: {codeagent}
+      target: /usr/local/bin/codeagentcli
+"""
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(
+        run["run_id"],
+        config={"selectedErrorTypes": ["stderr"], "harborYaml": submitted_yaml},
+    )
+
+    derived_run = store.get_run(result["runId"])
+    manifest = derived_run["sync_manifest"]
+    assert manifest["datasetPath"] == str(dataset.resolve())
+    assert manifest["bindAssets"] == [
+        {"source": str(codeagent.resolve()), "kind": "file", "targetName": "codeagentcli"}
+    ]
+
+
 def test_start_rerun_rejects_legacy_active_status_on_original_run(coordinator, store):
     run, _parent = seed_finished_run_with_cases(
         store,
