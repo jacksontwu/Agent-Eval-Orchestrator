@@ -231,16 +231,17 @@ def _apply_exception_rerun_merge(
     ).expanduser().resolve()
     if jobs_dir is not None:
         resolved_jobs_dir = jobs_dir
-    if run_row and run_row.get("parent_run_id"):
-        final_job_dir = resolved_jobs_dir / sanitize_name(str(run_row["display_name"]))
-        source_for_final = rerun_imported if rerun_imported.exists() else rerun_job_dir
-        if source_for_final is not None and source_for_final.exists():
-            copy_trial_dirs(source_for_final, final_job_dir)
-            try:
-                refresh_job_result(job_dir=final_job_dir)
-            except RuntimeError:
-                pass
-    elif run_row and str(run_row.get("rerun_status") or "") in {"succeeded", "failed"}:
+    is_terminal_rerun = bool(
+        run_row and str(run_row.get("rerun_status") or "") in {"succeeded", "failed"}
+    )
+    is_derived_run = bool(run_row and run_row.get("parent_run_id"))
+    uses_derived_jobs_dir = False
+    if run_row and is_derived_run:
+        uses_derived_jobs_dir = _is_subpath(
+            resolved_jobs_dir,
+            derived_jobs_dir_for_run(store=store, run=run_row),
+        )
+    if is_terminal_rerun and (not is_derived_run or uses_derived_jobs_dir):
         try:
             _rebuild_merged_job_for_run(
                 store=store,
@@ -249,6 +250,15 @@ def _apply_exception_rerun_merge(
             )
         except RuntimeError:
             pass
+    elif run_row and is_derived_run:
+        final_job_dir = resolved_jobs_dir / sanitize_name(str(run_row["display_name"]))
+        source_for_final = rerun_imported if rerun_imported.exists() else rerun_job_dir
+        if source_for_final is not None and source_for_final.exists():
+            copy_trial_dirs(source_for_final, final_job_dir)
+            try:
+                refresh_job_result(job_dir=final_job_dir)
+            except RuntimeError:
+                pass
     return True
 
 

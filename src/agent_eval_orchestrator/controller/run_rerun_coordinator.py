@@ -887,6 +887,11 @@ class RunRerunCoordinator:
         except (RuntimeError, ValueError) as exc:
             raise RerunValidationError(400, str(exc)) from exc
         runtime_job_name = sanitize_name(str(run["display_name"]))
+        derived_jobs_dir = derived_jobs_dir_for_run(store=self.store, run=run)
+        self._copy_source_job_to_derived_jobs_dir(
+            derived_run=run,
+            target_jobs_dir=derived_jobs_dir,
+        )
         runtime_plan = replace(plan, generated_job_name=runtime_job_name)
         yaml_by_batch_id: dict[str, str] = {}
         for batch_id, case_ids in rerun_batch_case_ids.items():
@@ -917,7 +922,7 @@ class RunRerunCoordinator:
                 "harborYamlGeneratedJobName": runtime_job_name,
                 "harborYamlByBatchId": yaml_by_batch_id,
                 "collectJobs": True,
-                "combinedJobsDir": str(derived_jobs_dir_for_run(store=self.store, run=run)),
+                "combinedJobsDir": str(derived_jobs_dir),
             },
             replace_keys={"harborYamlByBatchId"},
         )
@@ -926,6 +931,26 @@ class RunRerunCoordinator:
             run_id=str(run["run_id"]),
             sync_manifest=manifest,
         )
+
+    def _copy_source_job_to_derived_jobs_dir(
+        self,
+        *,
+        derived_run: dict[str, Any],
+        target_jobs_dir: Path,
+    ) -> None:
+        parent_run_id = str(derived_run.get("parent_run_id") or "").strip()
+        if not parent_run_id:
+            return
+        parent_run = self.store.get_run(parent_run_id)
+        if not parent_run:
+            return
+        source_template = self.store.get_task_template(str(parent_run["template_id"]))
+        if not source_template:
+            return
+        source_job_dir = self._source_job_dir_for_run(run=parent_run, template=source_template)
+        if source_job_dir is None:
+            return
+        copy_harbor_job(source_job_dir, target_jobs_dir / source_job_dir.name)
 
     def _set_derived_template_jobs_dir(
         self,

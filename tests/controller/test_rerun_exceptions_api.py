@@ -821,6 +821,106 @@ def test_job_archive_for_derived_exception_rerun_does_not_rebuild_from_sibling_j
     server.shutdown()
 
 
+def test_harbor_yaml_derived_rerun_rebuilds_full_job_on_final_heartbeat(store, tmp_path):
+    dataset = tmp_path / "dataset"
+    for case_id in ("ok", "exc-a"):
+        case_dir = dataset / case_id
+        case_dir.mkdir(parents=True)
+        (case_dir / "task.toml").write_text("", encoding="utf-8")
+    _make_worker_local(store, tmp_path)
+    run, _original_parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+            {
+                "case_id": "exc-a",
+                "status": "errored",
+                "error_text": "ValueError: boom",
+                "metrics": {"errorType": "stderr"},
+            },
+        ],
+    )
+    original_jobs_dir = tmp_path / "original-harbor" / "jobs"
+    original_job_dir = original_jobs_dir / sanitize_name(str(run["display_name"]))
+    (original_job_dir / "config.json").parent.mkdir(parents=True)
+    (original_job_dir / "config.json").write_text(
+        json.dumps({"job_name": original_job_dir.name, "jobs_dir": str(original_jobs_dir)}),
+        encoding="utf-8",
+    )
+    _write_jobs_trial(original_job_dir, "ok__old", task_name="ok")
+    original_exc_trial = _write_jobs_trial(original_job_dir, "exc-a__old", task_name="exc-a")
+    (original_exc_trial / "exception.txt").write_text(
+        "Traceback (most recent call last):\nValueError: boom\n",
+        encoding="utf-8",
+    )
+    store.update_task_template_dataset_ref(run["template_id"], str(dataset))
+    store.update_task_template_executor_config(
+        str(run["template_id"]),
+        {"combinedJobsDir": str(original_jobs_dir)},
+    )
+    harbor_yaml = f"""
+job_name: ignored
+agents:
+  - name: codex
+datasets:
+  - path: {dataset}
+    task_names:
+      - exc-a
+"""
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(
+        run["run_id"],
+        config={"selectedErrorTypes": ["ValueError"], "harborYaml": harbor_yaml},
+    )
+    derived_run = store.get_run(result["runId"])
+    derived_jobs_dir = derived_jobs_dir_for_run(store=store, run=derived_run)
+    derived_template = store.get_task_template(str(derived_run["template_id"]))
+    assert Path(derived_template["executor_config"]["combinedJobsDir"]) == derived_jobs_dir
+    job = store.get_run_rerun_job(result["rerunJobId"])
+    rerun_batch = store.get_batch(job["rerun_batches"]["worker-a"])
+    rerun_imported_dir = store.layout.controller_dir / "imported-jobs" / rerun_batch["batch_id"]
+    _write_jobs_trial(rerun_imported_dir, "exc-a__new", task_name="exc-a")
+    final_job_dir = derived_jobs_dir / sanitize_name(str(derived_run["display_name"]))
+
+    server = start_test_server(store, tmp_path, 9908)
+    conn = HTTPConnection("127.0.0.1", 9908)
+    body = json.dumps(
+        {
+            "batchId": rerun_batch["batch_id"],
+            "workerId": "worker-a",
+            "status": "succeeded",
+            "finished": True,
+            "executorMetadata": {"combinedJobsDir": str(derived_jobs_dir)},
+            "cases": [
+                {
+                    "caseId": "exc-a",
+                    "status": "succeeded",
+                    "score": 1.0,
+                    "metrics": {},
+                    "artifactIndex": {},
+                }
+            ],
+            "summary": {"succeeded": 1, "failed": 0, "errored": 0, "total": 1},
+        }
+    )
+    with patch("agent_eval_orchestrator.normalizers.harbor_job_merge.finalize_job_result_with_harbor"):
+        conn.request(
+            "POST",
+            "/api/workers/heartbeat",
+            body=body,
+            headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+        )
+        resp = conn.getresponse()
+
+    assert resp.status == 200
+    assert (final_job_dir / "config.json").exists()
+    assert (final_job_dir / "ok__old" / "result.json").exists()
+    assert (final_job_dir / "exc-a__new" / "result.json").exists()
+    assert not (final_job_dir / "exc-a__old").exists()
+    trial_dirs = [child.name for child in final_job_dir.iterdir() if child.is_dir()]
+    assert sorted(trial_dirs) == ["exc-a__new", "ok__old"]
+    server.shutdown()
+
+
 def test_job_sources_for_derived_rerun_ignore_shared_jobs_dir_siblings(store, tmp_path):
     run, _original_parent = seed_finished_run_with_cases(
         store,
