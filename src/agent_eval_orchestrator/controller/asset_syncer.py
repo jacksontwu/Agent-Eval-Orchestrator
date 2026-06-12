@@ -521,10 +521,12 @@ class AssetSyncer:
         executor_config = dict((template or {}).get("executor_config") or {})
         worker_shards = dict(rerun_job["worker_shards"])
         worker_ids = list(worker_shards.keys())
+        bind_assets = list(manifest.get("bindAssets") or [])
         include_bitfun = bool(str(manifest.get("bitfunCliPath") or "").strip()) and bool(
             str(manifest.get("bitfunConfigDir") or "").strip()
         )
-        steps = initial_worker_steps(worker_ids, include_bitfun=include_bitfun)
+        include_assets = bool(bind_assets) or include_bitfun
+        steps = initial_worker_steps(worker_ids, include_assets=include_assets)
         sync_job_id = new_id("sync")
         self.store.update_run_rerun_job(job_id, status="running", sync_job_id=sync_job_id)
         self.store.create_asset_sync_job(job_id=sync_job_id, run_id=run_id, steps=steps)
@@ -540,8 +542,8 @@ class AssetSyncer:
             if missing_workers:
                 for worker_id in worker_ids:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "failed")
-                    if include_bitfun:
-                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
+                    if include_assets:
+                        steps = set_worker_step_status(steps, worker_id, "sync_assets", "failed")
                 self._finish_rerun_sync_failure(
                     run_id=run_id,
                     job_id=job_id,
@@ -555,8 +557,8 @@ class AssetSyncer:
                 return
             for worker_id in worker_ids:
                 steps = set_worker_step_status(steps, worker_id, "sync_cases", "succeeded")
-                if include_bitfun:
-                    steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
+                if include_assets:
+                    steps = set_worker_step_status(steps, worker_id, "sync_assets", "succeeded")
                 self.store.promote_worker_batches_to_queued(run_id=run_id, worker_id=worker_id)
             self._finish_rerun_sync_success(
                 run_id=run_id,
@@ -581,32 +583,42 @@ class AssetSyncer:
                 self._sync_cases(entry, manifest)
                 with lock:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "succeeded")
-                    if include_bitfun:
-                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "running")
+                    if include_assets:
+                        steps = set_worker_step_status(steps, worker_id, "sync_assets", "running")
                         self.store.update_asset_sync_job(sync_job_id, steps=steps)
-                if include_bitfun:
-                    self._sync_bitfun(entry, manifest)
+                if include_assets:
+                    if include_bitfun:
+                        self._sync_bitfun(entry, manifest)
+                    if bind_assets:
+                        self._sync_bind_assets(entry, bind_assets)
                     with lock:
-                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "succeeded")
+                        steps = set_worker_step_status(steps, worker_id, "sync_assets", "succeeded")
                         self.store.update_asset_sync_job(sync_job_id, steps=steps)
                 uv_binary = str((executor_config.get("uvBinaryByWorker") or {}).get(worker_id) or "")
                 paths = worker_executor_paths(
                     target_root=str(entry["targetRoot"]),
                     uv_binary=uv_binary,
                 )
+                asset_paths = worker_asset_paths(
+                    target_root=str(entry["targetRoot"]),
+                    bind_assets=bind_assets,
+                )
+                patch = {
+                    "datasetPathByWorker": {worker_id: paths["datasetPath"]},
+                    "mountsByWorker": {worker_id: paths["mounts"]},
+                }
+                if asset_paths:
+                    patch["assetPathsByWorker"] = {worker_id: asset_paths}
                 self.store.update_task_template_executor_config(
                     str(run["template_id"]),
-                    {
-                        "datasetPathByWorker": {worker_id: paths["datasetPath"]},
-                        "mountsByWorker": {worker_id: paths["mounts"]},
-                    },
+                    patch,
                 )
                 self.store.promote_worker_batches_to_queued(run_id=run_id, worker_id=worker_id)
             except Exception as exc:
                 with lock:
                     steps = set_worker_step_status(steps, worker_id, "sync_cases", "failed")
-                    if include_bitfun:
-                        steps = set_worker_step_status(steps, worker_id, "sync_bitfun", "failed")
+                    if include_assets:
+                        steps = set_worker_step_status(steps, worker_id, "sync_assets", "failed")
                     self.store.update_asset_sync_job(sync_job_id, steps=steps)
                 self.store.mark_worker_batches_sync_failed(run_id=run_id, worker_id=worker_id)
                 errors.append(f"{worker_id}: {exc}")

@@ -397,6 +397,85 @@ def test_asset_syncer_promotes_batches_on_success(store, tmp_path, sample_ssh_co
     assert os.access(copied_codeagent, os.X_OK)
 
 
+def test_sync_rerun_job_syncs_bind_assets_and_records_asset_paths(store, tmp_path, sample_ssh_config):
+    dataset = tmp_path / "dataset"
+    case_a = dataset / "case-a"
+    case_a.mkdir(parents=True)
+    (case_a / "task.toml").write_text("", encoding="utf-8")
+    codeagent = tmp_path / "codeagentcli"
+    codeagent.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(codeagent, 0o755)
+    shared = tmp_path / "runtime"
+    store.register_worker(
+        worker_id="local-a",
+        display_name="local",
+        host="localhost",
+        slots_total=1,
+        slots_used=0,
+        capabilities={"sharedRoot": str(shared), "localToController": True},
+    )
+    template = store.create_task_template(
+        owner="default",
+        name="rerun-sync",
+        dataset_ref=str(dataset),
+        executor_kind="harbor-docker",
+        executor_config={
+            "harborYamlByBatchId": {"batch-rerun": "job_name: x\njobs_dir: jobs\n"},
+            "uvBinaryByWorker": {"local-a": "/usr/bin/uv"},
+        },
+        model_profile_ref=None,
+        note="",
+    )
+    run = store.create_run(template_id=template["template_id"])
+    batch = store.create_batch(
+        run_id=run["run_id"],
+        selected_case_ids=["case-a"],
+        preferred_worker_id="local-a",
+        batch_options={},
+        initial_status="pending_sync",
+        batch_kind="exception_rerun",
+    )
+    job = store.create_run_rerun_job(
+        job_id="rerun-job",
+        run_id=run["run_id"],
+        case_ids=["case-a"],
+        worker_shards={"local-a": ["case-a"]},
+        rerun_batches={"local-a": batch["batch_id"]},
+        selected_error_types=["stderr"],
+    )
+    store.update_run_rerun_fields(run_id=run["run_id"], rerun_status="syncing", rerun_job_id=job["job_id"])
+    store.update_run_sync_fields(
+        run_id=run["run_id"],
+        sync_manifest={
+            "datasetPath": str(dataset),
+            "bindAssets": [
+                {"source": str(codeagent), "kind": "file", "targetName": "codeagentcli"},
+            ],
+            "workers": {
+                "local-a": {
+                    "caseIds": ["case-a"],
+                    "targetRoot": str(shared / "sync" / run["run_id"]),
+                    "transport": "local",
+                }
+            },
+        },
+    )
+    syncer = AssetSyncer(store=store, ssh_config_path=sample_ssh_config, controller_shared_root=tmp_path)
+
+    syncer.sync_rerun_job(job_id=job["job_id"], run_id=run["run_id"])
+
+    updated_job = store.get_run_rerun_job(job["job_id"])
+    assert updated_job["status"] == "running"
+    sync_job = store.get_asset_sync_job(updated_job["sync_job_id"])
+    assert sync_job["status"] == "succeeded"
+    assert [step["id"] for step in sync_job["steps"][0]["steps"]] == ["sync_cases", "sync_assets"]
+    copied_codeagent = shared / "sync" / run["run_id"] / "assets" / "codeagentcli"
+    assert copied_codeagent.read_text(encoding="utf-8") == "#!/bin/sh\n"
+    updated_template = store.get_task_template(template["template_id"])
+    asset_paths = updated_template["executor_config"]["assetPathsByWorker"]["local-a"]
+    assert asset_paths[str(codeagent)] == str(copied_codeagent)
+
+
 def test_cleanup_run_sync_assets_local(store, tmp_path, sample_ssh_config):
     shared = tmp_path / "runtime"
     target = shared / "sync" / "run-clean"
