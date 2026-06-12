@@ -1267,7 +1267,7 @@ INDEX_HTML = """<!doctype html>
         alert(reason);
         return;
       }
-      openRerunConfigModal(detail);
+      await openRerunConfigModal(detail);
     }
 
     function renderTaskDetail() {
@@ -1632,19 +1632,24 @@ INDEX_HTML = """<!doctype html>
       document.getElementById("rerunConfigModal").classList.add("hidden");
     }
 
-    function openRerunConfigModal(detail) {
+    async function openRerunConfigModal(detail) {
       const byType = (detail.exceptionSummary && detail.exceptionSummary.byType) || [];
       const defaultSelected = byType.map(entry => entry.errorType);
       state.rerunConfig = {
         runId: detail.run.run_id,
         detail,
-        defaults: buildRerunFormDefaults(detail),
         selectedErrorTypes: defaultSelected,
+        yamlText: "",
+        yamlSource: "",
+        yamlDirty: false,
+        rerunYamlPreview: null,
         error: "",
+        loadingPreview: false,
         submitting: false,
       };
       renderRerunConfigModal();
       document.getElementById("rerunConfigModal").classList.remove("hidden");
+      await loadRerunHarborYamlPreview();
     }
 
     function rerunSelectedCaseCount(detail, selectedTypes) {
@@ -1653,6 +1658,33 @@ INDEX_HTML = """<!doctype html>
       return byType.reduce((sum, entry) => (
         selected.has(entry.errorType) ? sum + Number(entry.count || 0) : sum
       ), 0);
+    }
+
+    async function loadRerunHarborYamlPreview() {
+      const modalState = state.rerunConfig;
+      if (!modalState || modalState.loadingPreview) return;
+      modalState.loadingPreview = true;
+      modalState.error = "";
+      renderRerunConfigModal();
+      try {
+        const result = await api("/api/runs/" + encodeURIComponent(modalState.runId) + "/rerun-exceptions/harbor-yaml-preview", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({selectedErrorTypes: modalState.selectedErrorTypes || []}),
+        });
+        modalState.rerunYamlPreview = result;
+        modalState.yamlSource = result.source || "";
+        if (!modalState.yamlDirty) {
+          modalState.yamlText = String(result.harborYaml || "");
+        }
+      } catch (error) {
+        modalState.error = formatApiError(error);
+      } finally {
+        if (state.rerunConfig) {
+          state.rerunConfig.loadingPreview = false;
+          renderRerunConfigModal();
+        }
+      }
     }
 
     function renderRerunTypeSelectionHtml(modalState) {
@@ -1690,7 +1722,6 @@ INDEX_HTML = """<!doctype html>
         return;
       }
       const detail = modalState.detail;
-      const defaults = modalState.defaults;
       const submitLabel = modalState.submitting ? "提交中…" : "确认重跑";
       const selectedCount = rerunSelectedCaseCount(detail, modalState.selectedErrorTypes);
       const total = Number((detail.exceptionSummary && detail.exceptionSummary.total) || detail.exceptionCount || 0);
@@ -1709,25 +1740,15 @@ INDEX_HTML = """<!doctype html>
         '</div>' +
         (modalState.error ? '<div class="empty" style="color:var(--bad);padding:10px 0">' + esc(modalState.error) + '</div>' : '') +
         '<form id="rerunConfigForm">' +
-          '<div class="detail-grid" style="margin-bottom:16px">' +
-            '<div class="field"><label>Executor</label><input name="executorKind" value="' + esc(defaults.executorKind) + '" readonly /></div>' +
-            '<div class="field"><label>Agent Name</label><input name="agentName" value="' + esc(defaults.agentName) + '" readonly /></div>' +
-            '<div class="field"><label>Per Worker Concurrency</label><input name="nConcurrent" type="number" min="1" value="' + esc(defaults.nConcurrent) + '" required /></div>' +
-          '</div>' +
-          '<div class="detail-grid" style="margin-bottom:16px">' +
-            '<div class="field"><label>Timeout Multiplier</label><input name="timeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.timeoutMultiplier) + '" /></div>' +
-            '<div class="field"><label>Agent Timeout Multiplier</label><input name="agentTimeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.agentTimeoutMultiplier) + '" /></div>' +
-            '<div class="field"><label>Verifier Timeout Multiplier</label><input name="verifierTimeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.verifierTimeoutMultiplier) + '" /></div>' +
-            '<div class="field"><label>Environment Build Multiplier</label><input name="environmentBuildTimeoutMultiplier" type="number" min="0.1" step="0.1" value="' + esc(defaults.environmentBuildTimeoutMultiplier) + '" /></div>' +
-          '</div>' +
-          '<div class="detail-grid" style="margin-bottom:16px">' +
-            '<div class="field"><label>Dataset Path</label><input name="datasetPath" value="' + esc(defaults.datasetPath) + '" required /></div>' +
-            '<div class="field"><label>BitFun CLI Path</label><input name="bitfunCliPath" value="' + esc(defaults.bitfunCliPath) + '" required /></div>' +
-            '<div class="field"><label>BitFun Config Root</label><input name="bitfunConfigDir" value="' + esc(defaults.bitfunConfigDir) + '" required /></div>' +
-            '<div class="field"><label>Jobs Dir</label><input name="jobsDir" value="' + esc(defaults.jobsDir) + '" required /></div>' +
+          '<div class="field" style="margin-bottom:16px">' +
+            '<label>Harbor YAML</label>' +
+            '<textarea name="rerunHarborYaml" required style="min-height:360px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">' + esc(modalState.yamlText || "") + '</textarea>' +
+            '<div class="subtle" style="margin-top:8px">Exception 类型决定重跑范围；YAML 中的 task_names/tasks 仅作为参数模板，最终执行范围由后台覆盖。</div>' +
+            (modalState.loadingPreview ? '<div class="subtle" style="margin-top:8px">正在加载 YAML 预览…</div>' : '') +
+            (modalState.yamlSource ? '<div class="subtle" style="margin-top:8px">YAML 来源：' + esc(modalState.yamlSource) + '</div>' : '') +
           '</div>' +
           '<div class="actions">' +
-            '<button class="primary" type="submit"' + (submitDisabled ? ' disabled' : '') + '>' + submitLabel + '</button>' +
+            '<button class="primary" type="submit"' + (submitDisabled || modalState.loadingPreview ? ' disabled' : '') + '>' + submitLabel + '</button>' +
             '<button class="ghost" type="button" id="cancelRerunConfigBtn"' + (modalState.submitting ? ' disabled' : '') + '>取消</button>' +
           '</div>' +
         '</form>';
@@ -1737,6 +1758,7 @@ INDEX_HTML = """<!doctype html>
             body.querySelectorAll('input[name="rerunErrorType"]:checked')
           ).map(el => el.value);
           renderRerunConfigModal();
+          loadRerunHarborYamlPreview();
         });
       });
       const selectAllBtn = document.getElementById("rerunSelectAllTypesBtn");
@@ -1744,6 +1766,7 @@ INDEX_HTML = """<!doctype html>
         selectAllBtn.addEventListener("click", () => {
           modalState.selectedErrorTypes = (detail.exceptionSummary?.byType || []).map(entry => entry.errorType);
           renderRerunConfigModal();
+          loadRerunHarborYamlPreview();
         });
       }
       const clearAllBtn = document.getElementById("rerunClearAllTypesBtn");
@@ -1751,10 +1774,18 @@ INDEX_HTML = """<!doctype html>
         clearAllBtn.addEventListener("click", () => {
           modalState.selectedErrorTypes = [];
           renderRerunConfigModal();
+          loadRerunHarborYamlPreview();
         });
       }
       document.getElementById("cancelRerunConfigBtn").addEventListener("click", closeRerunConfigModal);
       document.getElementById("rerunConfigForm").addEventListener("submit", submitRerunConfigForm);
+      const yamlEditor = body.querySelector('textarea[name="rerunHarborYaml"]');
+      if (yamlEditor) {
+        yamlEditor.addEventListener("input", () => {
+          modalState.yamlText = yamlEditor.value;
+          modalState.yamlDirty = true;
+        });
+      }
     }
 
     async function submitRerunConfigForm(event) {
@@ -1766,21 +1797,15 @@ INDEX_HTML = """<!doctype html>
         renderRerunConfigModal();
         return;
       }
-      const payload = collectTaskConfigPayload(event.target);
-      modalState.defaults = {
-        ...modalState.defaults,
-        executorKind: String(new FormData(event.target).get("executorKind") || modalState.defaults.executorKind || "harbor-docker"),
-        agentName: String(payload.executorConfig.agentName || modalState.defaults.agentName || "bitfun-cli"),
-        nConcurrent: payload.executorConfig.nConcurrent,
-        timeoutMultiplier: payload.executorConfig.timeoutMultiplier,
-        agentTimeoutMultiplier: payload.executorConfig.agentTimeoutMultiplier,
-        verifierTimeoutMultiplier: payload.executorConfig.verifierTimeoutMultiplier,
-        environmentBuildTimeoutMultiplier: payload.executorConfig.environmentBuildTimeoutMultiplier,
-        datasetPath: payload.datasetPath,
-        bitfunCliPath: payload.bitfunCliPath,
-        bitfunConfigDir: payload.bitfunConfigDir,
-        jobsDir: payload.jobsDir,
-      };
+      const data = new FormData(event.target);
+      const harborYaml = String(data.get("rerunHarborYaml") || "").trim();
+      if (!harborYaml) {
+        modalState.error = "请填写 Harbor YAML";
+        renderRerunConfigModal();
+        return;
+      }
+      modalState.yamlText = harborYaml;
+      modalState.yamlDirty = true;
       modalState.submitting = true;
       modalState.error = "";
       renderRerunConfigModal();
@@ -1790,7 +1815,7 @@ INDEX_HTML = """<!doctype html>
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
-            ...payload,
+            harborYaml: String(data.get("rerunHarborYaml") || "").trim(),
             selectedErrorTypes: modalState.selectedErrorTypes || [],
           }),
         });

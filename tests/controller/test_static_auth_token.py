@@ -83,3 +83,14 @@ def test_create_payload_sends_harbor_yaml_and_worker_ids_only() -> None:
     assert 'harborYaml: String(data.get("harborYaml") || "").trim()' in INDEX_HTML
     assert "任务已创建，正在分发到 worker" in INDEX_HTML
     assert "任务已创建，正在同步资产到 worker" not in INDEX_HTML
+
+
+def test_rerun_modal_uses_harbor_yaml_preview_and_payload() -> None:
+    assert "rerunYamlPreview" in INDEX_HTML
+    assert "loadRerunHarborYamlPreview" in INDEX_HTML
+    assert 'name="rerunHarborYaml"' in INDEX_HTML
+    assert 'harborYaml: String(data.get("rerunHarborYaml") || "").trim()' in INDEX_HTML
+    assert '"/rerun-exceptions/harbor-yaml-preview"' in INDEX_HTML
+    assert "Per Worker Concurrency" not in INDEX_HTML
+    assert "BitFun CLI Path" not in INDEX_HTML
+    assert "BitFun Config Root" not in INDEX_HTML
