@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import yaml
 
 from agent_eval_orchestrator.controller.asset_syncer import build_sync_manifest, validate_create_task_assets
 from agent_eval_orchestrator.controller.executor_config import build_asset_sync_executor_config
@@ -24,6 +27,16 @@ if TYPE_CHECKING:
 
 RERUN_CONFIG_KEYS = ("datasetPath", "bitfunCliPath", "bitfunConfigDir", "jobsDir", "executorConfig")
 RERUN_SCOPE_KEYS = ("selectedErrorTypes",)
+
+
+@dataclass(frozen=True)
+class RerunScope:
+    exception_items: list[dict[str, Any]]
+    selected_error_types: list[str]
+    grouped: dict[str, list[dict[str, Any]]]
+    worker_shards: dict[str, list[str]]
+    all_case_ids: list[str]
+    dataset_path: Path
 
 
 class RerunValidationError(Exception):
@@ -49,41 +62,15 @@ class RunRerunCoordinator:
         if not source_template:
             raise RerunValidationError(404, "task template not found")
         existing_manifest = dict(run.get("sync_manifest") or {})
-        dataset_path = self._resolve_dataset_path(
-            config=config,
-            template=source_template,
-            existing_manifest=existing_manifest,
-        )
-
-        exception_items = self._list_rerun_exception_items(
+        scope = self._resolve_rerun_scope(
             run=run,
             template=source_template,
-            dataset_path=dataset_path,
-        )
-        selected_error_types = self._resolve_selected_error_types_from_items(
-            exception_items,
             config=config,
         )
-        if not selected_error_types:
-            raise RerunValidationError(400, "no exception cases")
-
-        selected_set = set(selected_error_types)
-        filtered_items = [
-            item for item in exception_items if str(item.get("error_type") or "") in selected_set
-        ]
-        if not filtered_items:
-            raise RerunValidationError(400, "no matching exception cases")
-
-        grouped = self.store.group_exception_items_by_worker(filtered_items)
-        if not grouped:
-            raise RerunValidationError(400, "no exception cases")
-
-        worker_shards = self._resolve_worker_shards(grouped, dataset_path)
-        all_case_ids = [
-            case_id
-            for case_ids in worker_shards.values()
-            for case_id in case_ids
-        ]
+        grouped = scope.grouped
+        worker_shards = scope.worker_shards
+        all_case_ids = scope.all_case_ids
+        selected_error_types = scope.selected_error_types
         asset_config = self._filter_config_for_assets(dict(config or {}))
         config_supplied = self._has_applicable_config(asset_config)
         if config_supplied:
@@ -210,6 +197,143 @@ class RunRerunCoordinator:
             "selectedErrorTypes": selected_error_types,
             "workerShards": {worker_id: len(case_ids) for worker_id, case_ids in worker_shards.items()},
         }
+
+    def preview_harbor_yaml(self, run_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        run = self.store.get_run(run_id)
+        if not run:
+            raise RerunValidationError(404, "run not found")
+        if not self.store.is_run_primary_terminal(run_id):
+            raise RerunValidationError(409, "run not finished")
+        source_template = self.store.get_task_template(str(run["template_id"]))
+        if not source_template:
+            raise RerunValidationError(404, "task template not found")
+        scope = self._resolve_rerun_scope(
+            run=run,
+            template=source_template,
+            config=config,
+        )
+        harbor_yaml, source = self._preview_harbor_yaml_for_run(run=run, template=source_template)
+        return {
+            "harborYaml": harbor_yaml,
+            "source": source,
+            "exceptionCount": len(scope.all_case_ids),
+            "selectedErrorTypes": scope.selected_error_types,
+            "workerShards": {worker_id: len(case_ids) for worker_id, case_ids in scope.worker_shards.items()},
+        }
+
+    def _resolve_rerun_scope(
+        self,
+        *,
+        run: dict[str, Any],
+        template: dict[str, Any],
+        config: dict[str, Any] | None,
+        dataset_path: Path | None = None,
+    ) -> RerunScope:
+        existing_manifest = dict(run.get("sync_manifest") or {})
+        resolved_dataset_path = dataset_path or self._resolve_dataset_path(
+            config=config,
+            template=template,
+            existing_manifest=existing_manifest,
+        )
+        exception_items = self._list_rerun_exception_items(
+            run=run,
+            template=template,
+            dataset_path=resolved_dataset_path,
+        )
+        selected_error_types = self._resolve_selected_error_types_from_items(
+            exception_items,
+            config=config,
+        )
+        if not selected_error_types:
+            raise RerunValidationError(400, "no exception cases")
+        selected_set = set(selected_error_types)
+        filtered_items = [
+            item for item in exception_items if str(item.get("error_type") or "") in selected_set
+        ]
+        if not filtered_items:
+            raise RerunValidationError(400, "no matching exception cases")
+        grouped = self.store.group_exception_items_by_worker(filtered_items)
+        if not grouped:
+            raise RerunValidationError(400, "no exception cases")
+        worker_shards = self._resolve_worker_shards(grouped, resolved_dataset_path)
+        all_case_ids = [
+            case_id
+            for case_ids in worker_shards.values()
+            for case_id in case_ids
+        ]
+        return RerunScope(
+            exception_items=filtered_items,
+            selected_error_types=selected_error_types,
+            grouped=grouped,
+            worker_shards=worker_shards,
+            all_case_ids=all_case_ids,
+            dataset_path=resolved_dataset_path,
+        )
+
+    def _preview_harbor_yaml_for_run(
+        self,
+        *,
+        run: dict[str, Any],
+        template: dict[str, Any],
+    ) -> tuple[str, str]:
+        executor_config = dict(template.get("executor_config") or {})
+        raw_yaml = str(executor_config.get("harborYaml") or "").strip()
+        if raw_yaml:
+            return raw_yaml, "original_yaml"
+        return self._build_legacy_rerun_harbor_yaml(run=run, template=template), "generated_legacy_yaml"
+
+    def _build_legacy_rerun_harbor_yaml(
+        self,
+        *,
+        run: dict[str, Any],
+        template: dict[str, Any],
+    ) -> str:
+        executor_config = dict(template.get("executor_config") or {})
+        agent: dict[str, Any] = {"name": str(executor_config.get("agentName") or "bitfun-cli")}
+        model_name = str(executor_config.get("modelName") or "").strip()
+        if model_name:
+            agent["model_name"] = model_name
+        payload: dict[str, Any] = {
+            "job_name": sanitize_name(str(run.get("display_name") or template.get("name") or "rerun")),
+            "jobs_dir": str(executor_config.get("combinedJobsDir") or DEFAULT_HARBOR_REPO / "jobs"),
+            "n_concurrent_trials": int(executor_config.get("nConcurrent") or DEFAULT_PER_WORKER_CONCURRENCY),
+            "agents": [agent],
+            "datasets": [
+                {
+                    "path": str(template.get("dataset_ref") or ""),
+                    "task_names": self._source_run_case_ids(str(run["run_id"])),
+                }
+            ],
+        }
+        mapping = {
+            "timeoutMultiplier": "timeout_multiplier",
+            "agentTimeoutMultiplier": "agent_timeout_multiplier",
+            "verifierTimeoutMultiplier": "verifier_timeout_multiplier",
+            "environmentBuildTimeoutMultiplier": "environment_build_timeout_multiplier",
+        }
+        for source_key, yaml_key in mapping.items():
+            value = executor_config.get(source_key)
+            if value not in (None, ""):
+                payload[yaml_key] = value
+        env_type = str(executor_config.get("envType") or "").strip()
+        mounts = executor_config.get("mounts")
+        environment: dict[str, Any] = {}
+        if env_type:
+            environment["type"] = env_type
+        if isinstance(mounts, list) and mounts:
+            environment["mounts"] = mounts
+        if environment:
+            payload["environment"] = environment
+        return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+
+    def _source_run_case_ids(self, run_id: str) -> list[str]:
+        case_ids: list[str] = []
+        for batch in self.store.list_primary_batches_for_run(run_id):
+            for case_id in batch.get("selected_case_ids") or []:
+                value = str(case_id or "").strip()
+                if value and value not in case_ids:
+                    case_ids.append(value)
+        return case_ids
 
     def _mark_derived_rerun_failed(self, *, run_id: str, job_id: str, error_text: str) -> None:
         job = self.store.get_run_rerun_job(job_id)

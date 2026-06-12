@@ -1,8 +1,10 @@
 import json
 import os
+from pathlib import Path
 from threading import Event, Lock, Thread
 
 import pytest
+import yaml
 
 import agent_eval_orchestrator.controller.run_rerun_coordinator as rerun_coordinator_module
 from agent_eval_orchestrator.controller.rerun_artifacts import (
@@ -24,6 +26,15 @@ def _derived_runs_for_parent(store, parent_run_id):
         item for item in store.list_runs()
         if item.get("parent_run_id") == parent_run_id
     ]
+
+
+def _make_dataset(tmp_path, case_ids):
+    dataset = tmp_path / "dataset"
+    for case_id in case_ids:
+        case_dir = dataset / case_id
+        case_dir.mkdir(parents=True)
+        (case_dir / "task.toml").write_text("", encoding="utf-8")
+    return dataset
 
 
 def test_start_rerun_rejects_unfinished_run(coordinator, store):
@@ -85,6 +96,90 @@ def test_start_rerun_creates_batches_and_job(coordinator, store):
     assert rerun_batch["parent_batch_id"] == derived_primary[0]["batch_id"]
     assert rerun_batch["status"] == "pending_sync"
     assert rerun_batch["selected_case_ids"] == ["exc-a"]
+
+
+def test_preview_harbor_yaml_returns_original_yaml_and_scope_stats(store, tmp_path):
+    dataset = _make_dataset(tmp_path, ["exc-a", "exc-b", "ok"])
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "stderr"}},
+            {"case_id": "exc-b", "status": "errored", "error_text": "timeout", "metrics": {"errorType": "AgentTimeoutError"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    yaml_text = f"""
+job_name: original
+agents:
+  - name: codex
+    model_name: openai/gpt-4o
+datasets:
+  - path: {dataset}
+    task_names:
+      - ok
+"""
+    store.update_task_template_dataset_ref(run["template_id"], str(dataset))
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {
+            "harborYaml": yaml_text,
+            "harborYamlMode": "datasets",
+            "harborYamlTaskIds": ["exc-a", "exc-b", "ok"],
+            "combinedJobsDir": "",
+        },
+    )
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    preview = coordinator.preview_harbor_yaml(
+        run["run_id"],
+        config={"selectedErrorTypes": ["stderr"]},
+    )
+
+    assert preview["source"] == "original_yaml"
+    assert preview["harborYaml"].strip() == yaml_text.strip()
+    assert preview["exceptionCount"] == 1
+    assert preview["selectedErrorTypes"] == ["stderr"]
+    assert preview["workerShards"] == {"worker-a": 1}
+
+
+def test_preview_harbor_yaml_generates_legacy_yaml(store, tmp_path):
+    dataset = _make_dataset(tmp_path, ["exc-a", "ok"])
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "stderr"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    store.update_task_template_dataset_ref(run["template_id"], str(dataset))
+    store.update_task_template_executor_config(
+        run["template_id"],
+        {
+            "agentName": "bitfun-cli",
+            "modelName": "deepseek-v4-pro",
+            "nConcurrent": 6,
+            "timeoutMultiplier": 1.25,
+            "agentTimeoutMultiplier": 3,
+            "verifierTimeoutMultiplier": 2,
+            "environmentBuildTimeoutMultiplier": 1.5,
+            "envType": "docker",
+        },
+    )
+    coordinator = RunRerunCoordinator(store=store, asset_syncer=None)
+
+    preview = coordinator.preview_harbor_yaml(run["run_id"], config={"selectedErrorTypes": ["stderr"]})
+    payload = yaml.safe_load(preview["harborYaml"])
+
+    assert preview["source"] == "generated_legacy_yaml"
+    assert payload["n_concurrent_trials"] == 6
+    assert payload["timeout_multiplier"] == 1.25
+    assert payload["agent_timeout_multiplier"] == 3
+    assert payload["verifier_timeout_multiplier"] == 2
+    assert payload["environment_build_timeout_multiplier"] == 1.5
+    assert payload["agents"] == [{"name": "bitfun-cli", "model_name": "deepseek-v4-pro"}]
+    assert payload["environment"] == {"type": "docker"}
+    assert payload["datasets"][0]["path"] == str(dataset)
+    assert payload["datasets"][0]["task_names"] == ["exc-a", "ok"]
 
 
 def test_start_rerun_rejects_legacy_active_status_on_original_run(coordinator, store):
