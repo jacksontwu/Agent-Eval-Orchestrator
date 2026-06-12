@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,6 +116,51 @@ def build_batch_harbor_yaml(
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
 
+def parse_rerun_harbor_yaml(
+    raw_yaml: str,
+    *,
+    selected_task_ids: list[str],
+    timestamp: str | None = None,
+) -> HarborYamlPlan:
+    raw_yaml = str(raw_yaml or "").strip()
+    if not raw_yaml:
+        raise HarborYamlError("harborYaml is required; paste valid Harbor YAML")
+    selected = [str(item).strip() for item in selected_task_ids if str(item).strip()]
+    if not selected:
+        raise HarborYamlError("selected_task_ids must not be empty")
+    try:
+        loaded = yaml.safe_load(raw_yaml)
+    except yaml.YAMLError as exc:
+        raise HarborYamlError(f"harborYaml must be valid Harbor YAML: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise HarborYamlError("harborYaml top-level value must be a mapping")
+
+    has_datasets = "datasets" in loaded
+    has_tasks = "tasks" in loaded
+    if has_datasets == has_tasks:
+        raise HarborYamlError("harborYaml must contain exactly one of datasets or tasks")
+
+    stamp = timestamp or safe_timestamp()
+    if has_datasets:
+        dataset_ref, task_ids, tasks_by_id = _resolve_rerun_dataset_tasks(loaded, selected)
+        mode = "datasets"
+    else:
+        dataset_ref, task_ids, tasks_by_id = _resolve_rerun_direct_tasks(loaded, selected)
+        mode = "tasks"
+
+    generated_job_name = _generated_job_name(loaded, dataset_ref=dataset_ref, timestamp=stamp)
+    return HarborYamlPlan(
+        original_yaml=raw_yaml,
+        original_config=deepcopy(loaded),
+        mode=mode,
+        dataset_ref=dataset_ref,
+        task_ids=task_ids,
+        generated_job_name=generated_job_name,
+        timestamp=stamp,
+        tasks_by_id=tasks_by_id,
+    )
+
+
 def discover_bind_assets(config: dict[str, Any]) -> list[BindAsset]:
     assets: list[BindAsset] = []
     seen: set[str] = set()
@@ -209,6 +255,62 @@ def _environment_mounts(config: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(mounts, list):
         return []
     return [mount for mount in mounts if isinstance(mount, dict)]
+
+
+def _resolve_rerun_dataset_tasks(
+    config: dict[str, Any],
+    selected_task_ids: list[str],
+) -> tuple[str, list[str], dict[str, dict[str, Any]]]:
+    datasets = config.get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        raise HarborYamlError("datasets must be a non-empty list")
+    if len(datasets) != 1:
+        raise HarborYamlError("only one dataset entry is supported")
+    dataset = datasets[0]
+    if not isinstance(dataset, dict):
+        raise HarborYamlError("datasets[0] must be a mapping")
+    dataset_path = Path(str(dataset.get("path") or "")).expanduser().resolve()
+    if not dataset_path.exists() or not dataset_path.is_dir():
+        raise HarborYamlError(f"dataset path not found: {dataset_path}")
+    for task_id in selected_task_ids:
+        if not (dataset_path / task_id).is_dir():
+            raise HarborYamlError(f"case directory not found: {task_id}")
+    tasks_by_id = {
+        task_id: {"path": str(dataset_path / task_id)}
+        for task_id in selected_task_ids
+    }
+    return str(dataset_path), list(selected_task_ids), tasks_by_id
+
+
+def _resolve_rerun_direct_tasks(
+    config: dict[str, Any],
+    selected_task_ids: list[str],
+) -> tuple[str, list[str], dict[str, dict[str, Any]]]:
+    tasks = config.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        raise HarborYamlError("tasks must be a non-empty list")
+    task_by_name: dict[str, dict[str, Any]] = {}
+    parent_paths: list[str] = []
+    for index, item in enumerate(tasks):
+        if not isinstance(item, dict):
+            raise HarborYamlError(f"tasks[{index}] must be a mapping")
+        path = Path(str(item.get("path") or "")).expanduser().resolve()
+        if not path.exists() or not path.is_dir():
+            raise HarborYamlError(f"task path not found: {path}")
+        copied = deepcopy(item)
+        copied["path"] = str(path)
+        task_by_name[path.name] = copied
+        parent_paths.append(str(path.parent))
+    dataset_root = Path(os.path.commonpath(parent_paths)).resolve()
+    tasks_by_id: dict[str, dict[str, Any]] = {}
+    for task_id in selected_task_ids:
+        copied = deepcopy(task_by_name.get(task_id) or {"path": str(dataset_root / task_id)})
+        path = Path(str(copied.get("path") or "")).expanduser().resolve()
+        if not path.exists() or not path.is_dir():
+            raise HarborYamlError(f"task path not found: {task_id}")
+        copied["path"] = str(path)
+        tasks_by_id[task_id] = copied
+    return str(dataset_root), list(selected_task_ids), tasks_by_id
 
 
 def _resolve_dataset_tasks(config: dict[str, Any]) -> tuple[str, list[str], dict[str, dict[str, Any]]]:
