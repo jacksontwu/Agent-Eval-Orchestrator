@@ -1205,6 +1205,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _json_response(self, {"runId": run_id, "batches": batches}, 201)
             return
+        if path.startswith("/api/runs/") and path.endswith("/rerun-exceptions/harbor-yaml-preview"):
+            if self.run_rerun_coordinator is None:
+                _json_response(self, {"error": "rerun coordinator unavailable"}, 500)
+                return
+            if not isinstance(body, dict):
+                _json_response(self, {"error": "request body must be a JSON object"}, 400)
+                return
+            run_id = path.split("/")[3]
+            try:
+                result = self.run_rerun_coordinator.preview_harbor_yaml(run_id, config=body)
+            except RerunValidationError as exc:
+                _json_response(self, {"error": exc.message}, exc.code)
+                return
+            _json_response(self, result)
+            return
         if path.startswith("/api/runs/") and path.endswith("/rerun-exceptions"):
             if self.run_rerun_coordinator is None:
                 _json_response(self, {"error": "rerun coordinator unavailable"}, 500)

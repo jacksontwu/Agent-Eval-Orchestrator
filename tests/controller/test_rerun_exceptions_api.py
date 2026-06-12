@@ -308,6 +308,93 @@ def test_post_rerun_exceptions_rejects_invalid_config_without_job(store, tmp_pat
     server.shutdown()
 
 
+def test_rerun_exceptions_harbor_yaml_preview_api_returns_original_yaml(store, tmp_path):
+    dataset = tmp_path / "dataset"
+    for case_id in ("exc-a", "ok"):
+        case_dir = dataset / case_id
+        case_dir.mkdir(parents=True)
+        (case_dir / "task.toml").write_text("", encoding="utf-8")
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "stderr"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    yaml_text = f"""
+agents:
+  - name: codex
+datasets:
+  - path: {dataset}
+    task_names:
+      - ok
+"""
+    store.update_task_template_dataset_ref(run["template_id"], str(dataset))
+    store.update_task_template_executor_config(run["template_id"], {"harborYaml": yaml_text})
+    server = start_test_server(store, tmp_path, 9917)
+    conn = HTTPConnection("127.0.0.1", 9917)
+    conn.request(
+        "POST",
+        f"/api/runs/{run['run_id']}/rerun-exceptions/harbor-yaml-preview",
+        body=json.dumps({"selectedErrorTypes": ["stderr"]}),
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 200
+    assert payload["source"] == "original_yaml"
+    assert payload["harborYaml"].strip() == yaml_text.strip()
+    assert payload["exceptionCount"] == 1
+    assert payload["workerShards"] == {"worker-a": 1}
+
+
+def test_rerun_exceptions_api_accepts_harbor_yaml_body(store, tmp_path):
+    dataset = tmp_path / "dataset"
+    for case_id in ("exc-a", "ok"):
+        case_dir = dataset / case_id
+        case_dir.mkdir(parents=True)
+        (case_dir / "task.toml").write_text("", encoding="utf-8")
+    _make_worker_local(store, tmp_path)
+    run, _parent = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {"case_id": "exc-a", "status": "errored", "error_text": "boom", "metrics": {"errorType": "stderr"}},
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    store.update_task_template_dataset_ref(run["template_id"], str(dataset))
+    server = start_test_server(store, tmp_path, 9918)
+    conn = HTTPConnection("127.0.0.1", 9918)
+    harbor_yaml = f"""
+job_name: ignored
+n_concurrent_trials: 3
+agents:
+  - name: codex
+datasets:
+  - path: {dataset}
+    task_names:
+      - ok
+"""
+    conn.request(
+        "POST",
+        f"/api/runs/{run['run_id']}/rerun-exceptions",
+        body=json.dumps({"selectedErrorTypes": ["stderr"], "harborYaml": harbor_yaml}),
+        headers={"Content-Type": "application/json", "X-AEO-Token": "secret"},
+    )
+    resp = conn.getresponse()
+    payload = json.loads(resp.read().decode("utf-8"))
+    server.shutdown()
+
+    assert resp.status == 201
+    assert payload["parentRunId"] == run["run_id"]
+    assert payload["exceptionCount"] == 1
+    derived_run = store.get_run(payload["runId"])
+    derived_template = store.get_task_template(derived_run["template_id"])
+    assert "harborYamlByBatchId" in derived_template["executor_config"]
+
+
 def test_post_rerun_exceptions_rejects_non_object_body_without_job(store, tmp_path):
     run, _parent = seed_finished_run_with_cases(
         store,
