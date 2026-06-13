@@ -2,6 +2,7 @@ import json
 import os
 import base64
 import io
+import shutil
 import tarfile
 from pathlib import Path
 from http.client import HTTPConnection
@@ -1221,6 +1222,56 @@ def test_rebuild_merged_jobs_can_target_single_run_in_shared_jobs_dir(store, tmp
     assert merged_names == [sanitize_name(str(run_a["display_name"]))]
     assert (jobs_dir / sanitize_name(str(run_a["display_name"])) / "case-a__new").exists()
     assert not (jobs_dir / sanitize_name(str(run_b["display_name"]))).exists()
+
+
+def test_rebuild_merged_jobs_preserves_existing_derived_final_job(store, tmp_path):
+    jobs_dir = tmp_path / "harbor" / "jobs"
+    run, _parent_batch = seed_finished_run_with_cases(
+        store,
+        cases=[
+            {
+                "case_id": "exc-a",
+                "status": "errored",
+                "error_text": "boom",
+                "metrics": {"errorType": "TimeoutError"},
+            },
+            {"case_id": "ok", "status": "succeeded", "score": 1.0},
+        ],
+    )
+    run = store.update_run_display_name(str(run["run_id"]), "source-job") or run
+    store.update_task_template_executor_config(
+        str(run["template_id"]),
+        {"combinedJobsDir": str(jobs_dir)},
+    )
+    source_job = jobs_dir / "source-job"
+    exc_trial = _write_jobs_trial(source_job, "exc-a__old", task_name="exc-a")
+    (exc_trial / "exception.txt").write_text("TimeoutError: boom\n", encoding="utf-8")
+    _write_jobs_trial(source_job, "ok__old", task_name="ok")
+    (source_job / "config.json").write_text(json.dumps({"job_name": "source-job"}), encoding="utf-8")
+
+    result = RunRerunCoordinator(store=store, asset_syncer=None).start_rerun(str(run["run_id"]))
+    derived_run = store.get_run(str(result["runId"]))
+    assert derived_run is not None
+    final_job = jobs_dir / sanitize_name(str(derived_run["display_name"]))
+    shutil.rmtree(final_job / "exc-a__old")
+    _write_jobs_trial(final_job, "exc-a__new", task_name="exc-a")
+    assert not (final_job / "exc-a__old").exists()
+
+    derived_primary = store.list_primary_batches_for_run(str(derived_run["run_id"]))[0]
+    stale_imported = store.layout.controller_dir / "imported-jobs" / str(derived_primary["batch_id"])
+    _write_jobs_trial(stale_imported, "exc-a__old", task_name="exc-a")
+    (stale_imported / "config.json").write_text(
+        json.dumps({"job_name": "stale-imported"}),
+        encoding="utf-8",
+    )
+    handler = type("DummyHandler", (), {"store": store})()
+
+    with patch("agent_eval_orchestrator.normalizers.harbor_job_merge.finalize_job_result_with_harbor"):
+        merged_names = Handler._rebuild_merged_jobs(handler, jobs_dir, run_id=str(derived_run["run_id"]))
+
+    assert merged_names == [sanitize_name(str(derived_run["display_name"]))]
+    assert (final_job / "exc-a__new").exists()
+    assert not (final_job / "exc-a__old").exists()
 
 
 def test_post_rerun_before_run_finished(store, tmp_path):

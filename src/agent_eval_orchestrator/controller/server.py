@@ -416,6 +416,12 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if not _run_uses_jobs_dir(store=self.store, run=run, jobs_dir=jobs_dir):
                 continue
+            if run.get("parent_run_id"):
+                merged_job_name = sanitize_name(str(run["display_name"]))
+                final_job_dir = jobs_dir / merged_job_name
+                if final_job_dir.exists():
+                    merged_names.append(merged_job_name)
+                    continue
             grouped_sources = _job_sources_for_run(
                 store=self.store,
                 run_id=str(run["run_id"]),
