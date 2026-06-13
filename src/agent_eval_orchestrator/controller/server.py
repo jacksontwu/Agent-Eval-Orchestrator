@@ -175,6 +175,15 @@ def _rebuild_merged_job_for_run(
                 shutil.rmtree(legacy_batch_dir)
 
 
+def _copy_job_metadata_if_missing(source_job_dir: Path, target_job_dir: Path) -> None:
+    target_job_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("config.json", "result.json"):
+        source_path = source_job_dir / filename
+        target_path = target_job_dir / filename
+        if source_path.exists() and not target_path.exists():
+            shutil.copy2(source_path, target_path)
+
+
 def _run_uses_jobs_dir(*, store: Store, run: dict[str, object], jobs_dir: Path) -> bool:
     template_id = str(run.get("template_id") or "").strip()
     template = store.get_task_template(template_id) if template_id else None
@@ -215,6 +224,7 @@ def _apply_exception_rerun_merge(
     rerun_imported = imported_root / batch_id
     if rerun_imported.exists():
         copy_trial_dirs(rerun_imported, parent_imported)
+        _copy_job_metadata_if_missing(rerun_imported, parent_imported)
     parent_batch = store.get_batch(parent_batch_id)
     rerun_job_dir: Path | None = None
     if parent_batch:
@@ -223,6 +233,7 @@ def _apply_exception_rerun_merge(
         if rerun_job_dir.exists():
             parent_job_dir.mkdir(parents=True, exist_ok=True)
             copy_trial_dirs(rerun_job_dir, parent_job_dir)
+            _copy_job_metadata_if_missing(rerun_job_dir, parent_job_dir)
     store.finish_rerun_batch_if_complete(rerun_batch_id=batch_id)
     run_row = store.get_run(str(batch_row["run_id"]))
     metadata = batch_row.get("executor_metadata") or {}

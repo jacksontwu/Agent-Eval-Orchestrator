@@ -448,15 +448,34 @@ class RunRerunCoordinator:
         run: dict[str, Any],
         template: dict[str, Any],
     ) -> Path | None:
-        raw_jobs_dir = str((template.get("executor_config") or {}).get("combinedJobsDir") or "").strip()
-        if not raw_jobs_dir:
-            return None
-        jobs_dir = Path(raw_jobs_dir).expanduser()
-        run_job_dir = jobs_dir / sanitize_name(str(run["display_name"]))
-        if run_job_dir.is_dir():
-            return run_job_dir
-        if jobs_dir.is_dir() and (jobs_dir / "config.json").exists():
-            return jobs_dir
+        run_job_name = sanitize_name(str(run["display_name"]))
+        candidates: list[tuple[Path, bool]] = []
+
+        def add_jobs_dir(raw_jobs_dir: object) -> None:
+            raw = str(raw_jobs_dir or "").strip()
+            if not raw:
+                return
+            jobs_dir = Path(raw).expanduser()
+            candidates.append((jobs_dir / run_job_name, False))
+            candidates.append((jobs_dir, True))
+
+        for batch in self.store.list_primary_batches_for_run(str(run["run_id"])):
+            metadata = batch.get("executor_metadata") or {}
+            add_jobs_dir(metadata.get("combinedJobsDir"))
+
+        add_jobs_dir((template.get("executor_config") or {}).get("combinedJobsDir"))
+
+        seen: set[Path] = set()
+        for candidate, require_config in candidates:
+            try:
+                key = candidate.resolve()
+            except OSError:
+                key = candidate.absolute()
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_dir() and (not require_config or (candidate / "config.json").exists()):
+                return candidate
         return None
 
     def _list_exception_items_from_db(self, run_id: str) -> list[dict[str, Any]]:
@@ -888,10 +907,12 @@ class RunRerunCoordinator:
             raise RerunValidationError(400, str(exc)) from exc
         runtime_job_name = sanitize_name(str(run["display_name"]))
         derived_jobs_dir = derived_jobs_dir_for_run(store=self.store, run=run)
-        self._copy_source_job_to_derived_jobs_dir(
-            derived_run=run,
-            target_jobs_dir=derived_jobs_dir,
-        )
+        source_job_dir = self._source_job_dir_for_parent_run(derived_run=run)
+        final_jobs_dir = source_job_dir.parent if source_job_dir is not None else derived_jobs_dir
+        if source_job_dir is not None:
+            final_job_dir = final_jobs_dir / runtime_job_name
+            if not final_job_dir.exists():
+                copy_harbor_job(source_job_dir, final_job_dir)
         runtime_plan = replace(plan, generated_job_name=runtime_job_name)
         yaml_by_batch_id: dict[str, str] = {}
         for batch_id, case_ids in rerun_batch_case_ids.items():
@@ -922,7 +943,7 @@ class RunRerunCoordinator:
                 "harborYamlGeneratedJobName": runtime_job_name,
                 "harborYamlByBatchId": yaml_by_batch_id,
                 "collectJobs": True,
-                "combinedJobsDir": str(derived_jobs_dir),
+                "combinedJobsDir": str(final_jobs_dir),
             },
             replace_keys={"harborYamlByBatchId"},
         )
@@ -938,19 +959,25 @@ class RunRerunCoordinator:
         derived_run: dict[str, Any],
         target_jobs_dir: Path,
     ) -> None:
+        source_job_dir = self._source_job_dir_for_parent_run(derived_run=derived_run)
+        if source_job_dir is not None:
+            copy_harbor_job(source_job_dir, target_jobs_dir / source_job_dir.name)
+
+    def _source_job_dir_for_parent_run(
+        self,
+        *,
+        derived_run: dict[str, Any],
+    ) -> Path | None:
         parent_run_id = str(derived_run.get("parent_run_id") or "").strip()
         if not parent_run_id:
-            return
+            return None
         parent_run = self.store.get_run(parent_run_id)
         if not parent_run:
-            return
+            return None
         source_template = self.store.get_task_template(str(parent_run["template_id"]))
         if not source_template:
-            return
-        source_job_dir = self._source_job_dir_for_run(run=parent_run, template=source_template)
-        if source_job_dir is None:
-            return
-        copy_harbor_job(source_job_dir, target_jobs_dir / source_job_dir.name)
+            return None
+        return self._source_job_dir_for_run(run=parent_run, template=source_template)
 
     def _set_derived_template_jobs_dir(
         self,
