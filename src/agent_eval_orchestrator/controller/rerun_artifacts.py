@@ -66,7 +66,7 @@ def copy_harbor_job(source_job_dir: Path, target_job_dir: Path) -> None:
     if target_job_dir.exists():
         shutil.rmtree(target_job_dir)
     target_job_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_job_dir, target_job_dir)
+    shutil.copytree(source_job_dir, target_job_dir, symlinks=True)
     config_path = target_job_dir / "config.json"
     if config_path.exists():
         payload = json.loads(config_path.read_text(encoding="utf-8"))

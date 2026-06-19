@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from agent_eval_orchestrator.controller.rerun_artifacts import (
+    copy_harbor_job,
     copy_jobs_tree,
     delete_trials_for_cases,
     derived_jobs_dir_for_run,
@@ -152,6 +153,28 @@ def test_copy_jobs_tree_rejects_broken_symlink_target(tmp_path):
 
     assert "target jobs path exists but is not a directory" in str(exc.value)
     assert target.is_symlink()
+
+
+def test_copy_harbor_job_preserves_dangling_debug_latest_symlink(tmp_path):
+    source = tmp_path / "source-job"
+    target = tmp_path / "target-job"
+    debug_dir = source / "case-a__trial" / "agent" / ".cac" / "debug"
+    debug_dir.mkdir(parents=True)
+    dangling_target = tmp_path / "missing-debug-log.txt"
+    (source / "case-a__trial" / "result.json").write_text(
+        json.dumps({"task_name": "case-a"}),
+        encoding="utf-8",
+    )
+    try:
+        (debug_dir / "latest").symlink_to(dangling_target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unsupported: {exc}")
+
+    copy_harbor_job(source, target)
+
+    copied_link = target / "case-a__trial" / "agent" / ".cac" / "debug" / "latest"
+    assert copied_link.is_symlink()
+    assert copied_link.readlink() == dangling_target
 
 
 def test_delete_trials_for_cases_missing_jobs_dir_returns_empty(tmp_path):
